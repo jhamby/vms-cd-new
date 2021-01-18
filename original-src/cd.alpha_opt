@@ -1,0 +1,13 @@
+! Descriptive information
+NAME="CD V6.0A ©1999, TDI"
+IDENTIFICATION="CD V6.0A/AXP"
+
+! Main Object
+sys$disk:[]cd.alpha_obj
+
+! Sub-modules
+sys$disk:[]cdparse.alpha_obj
+sys$disk:[]putmsg.alpha_obj
+
+! Message module
+sys$disk:[]cdmsg.alpha_obj

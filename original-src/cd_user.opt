@@ -1,0 +1,8 @@
+! Descriptive information
+NAME="CD_USER V1.0 ©1996, TDI"
+IDENTIFICATION="CD_USER V1.0VAX"
+
+! Main Object
+sys$disk:[]cd_user.obj
+
+universal=cd_process

@@ -1,0 +1,4638 @@
+	.title	CDPARSE- Change directory AKA Unix/MSDOS
+	.ident	'CDPARSE V6.0A'
+	.library "sys$share:lib"
+;++
+;
+; Program:	CDPARSE.MAR V6.0A
+; Author:	TECSys Development, Inc.
+; Date:		97.01.28
+; Updated:	98.08.07, 98.10.19, 99.08.12
+;
+; License:
+;    Ownership of and rights to these programs is retained by the author(s).
+;    Limited license to use and distribute the software in this library is
+;    hereby granted under the following conditions:
+;      1. Any and all authorship, ownership, copyright or licensing
+;         information is preserved within any source copies at all times.
+;      2. Under absolutely *NO* circumstances may any of this code be used
+;         in any form for commercial profit without a written licensing
+;         agreement from the author(s).  This does not imply that such
+;         a written agreement could not be obtained.
+;      3. Except by written agreement under condition 2, source shall
+;         be freely provided with all executables.
+;      4. Library contents may be transferred or copied in any form so
+;         long as conditions 1, 2, and 3 are met.  Nominal charges may
+;         be assessed for media and transferral labor without such charges
+;         being considered 'commercial profit' thereby violating condition 2.
+;
+; Warranty:
+;    These programs are distributed in the hopes that they will be useful, but
+;    WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+;    or FITNESS FOR A PARTICULAR PURPOSE.
+;--
+
+;
+;++
+;
+; Compatibility macros to make the Alpha macro compiler and the VAX
+; assembler co-exist happily, even on older versions of the VAX assembler.
+;
+;  Define ALPHA if R22 is a register and not a symbol
+.NTYPE	...IS_IT_ALPHA,R22		;Get the type of R22
+...IS_IT_ALPHA = <...IS_IT_ALPHA@-4&^XF>-5
+.IIF EQ,...IS_IT_ALPHA,	ALPHA=1
+
+.IF DF,ALPHA
+;
+; This is the ALPHA (previously called "EVAX") version of ARCH_DEFS.MAR,
+; which contains architectural definitions for compiling VMS sources
+; for VAX and ALPHA systems.
+;
+EVAX = 1
+BIGPAGE = 1
+ADDRESSBITS = 32
+;
+.IFF
+;
+; This is the VAX version of ARCH_DEFS.MAR, which contains
+; architectural definitions for compiling sources for
+; VAX systems.
+;
+VAX = 1
+VAXPAGE = 1
+ADDRESSBITS = 32
+
+.macro	.jsb_entry	input,output
+.endm	.jsb_entry
+.macro	.call_entry	nargs,label,preserve,output,home_args=TRUE
+.entry	label,	^m<preserve>
+.endm	.call_entry
+
+.ENDC
+;
+;--
+;
+
+	$atrdef			;XQP file attribute retrieval list items
+	$chfdef			;Condition handler frame def
+	$dcdef			;Device class definitions
+	$devdef			;DEVCHAR bits
+	$dvidef			;$GETDVI junk
+	$fibdef			;XQP FIB definition
+	$iodef			;IO function codes
+	$jpidef			;$getjpi function codes
+	$libdef			;LIB$ routine return codes
+	$lnmdef			;Logical name translation codes
+	$prvdef			;Privilege bit definitions
+	$rmsalldef		;Get most RMS structures
+	$rmsdef			;RMS return codes etc.
+	$ssdef			;System return codes
+	$stsdef			;Status structure
+	$tpadef			;LIB$TPARSE table generation junk
+	$uaidef			;UAI definition
+
+; Strictly speaking, the NAML can be present on VAX, however, as of 7.2EFT2,
+; the level of support for ODS5 as seen from the VAX does not seem to warrant
+; any particular special treatment.
+.IF DF,NAML$S_NAMLDEF
+ODS5=1		;Enable ODS5-specific code
+.PRINT 999 ; [7mODS-5 support enabled[m
+.IFF
+.PRINT 999 ; [7mODS-5 support NOT PRESENT[m
+.ENDC
+
+	.psect	$local,pic,noshr,noexe,rd,wrt,long
+	.psect	$tpastuff,pic,shr,noexe,rd,nowrt
+	.psect	$code,pic,shr,exe,rd,nowrt
+
+;++
+;  Local constants and macros
+;do_op() opcodes
+OP_C_BSL = 1  ;'\<eos>' processing
+OP_C_RST = 2  ;reset parser to top of string
+OP_C_DOL = 3  ;'$<eos>' processing
+OP_C_DD  = 4  ;'..' --> '-' processing
+OP_C_DEV = 5  ;devnam extraction
+OP_C_BRI = 6  ;'['..']' add w/insert
+OP_C_BRO = 7  ;'['..']' add w/overwrite
+OP_C_BDI = 8  ;'[.'..']' add w/insert
+OP_C_DOT = 9  ;change something at current token to '.'
+OP_C_DEL = 10 ;Deletes current char
+OP_C_RMV = 11 ;Deletes present parse position to beginning of line
+OP_C_BCK = 12 ;Back parser up one char
+OP_C_AT  = 13 ;code for username lookup
+OP_C_PND = 14 ;'#<eos>' processing
+OP_C_SCF = 15 ;Store Command File
+OP_C_NOD = 16 ;nodnam extraction
+OP_C_UPC = 17 ;Force accepted token uppercase & back up the parser
+OP_C_FID = 18 ;Cvt/UnCvt to/from FIDded specification
+OP_C_PAR = 19 ;Force use of parent DID for current dir
+
+; Switch values
+SW_V_LOG == 0
+SW_M_LOG == <1@SW_V_LOG>
+SW_V_VER == 1
+SW_M_VER == <1@SW_V_VER>
+SW_V_FUL == 2
+SW_M_FUL == <1@SW_V_FUL>
+SW_V_COM == 3
+SW_M_COM == <1@SW_V_COM>
+SW_V_INH == 4
+SW_M_INH == <1@SW_V_INH>
+SW_V_PART == 5
+SW_M_PART == <1@SW_V_PART>
+SW_V_AUTO == 6
+SW_M_AUTO == <1@SW_V_AUTO>
+SW_V_COMDF == 7
+SW_M_COMDF == <1@SW_V_COMDF>
+SW_V_HOME == 8
+SW_M_HOME == <1@SW_V_HOME>
+SW_V_CSH == 9
+SW_M_CSH == <1@SW_V_CSH>
+SW_V_PUSH == 10
+SW_M_PUSH == <1@SW_V_PUSH>
+SW_V_POP == 11
+SW_M_POP == <1@SW_V_POP>
+SW_V_VERSID == 12
+SW_M_VERSID == <1@SW_V_VERSID>
+SW_V_NIN == 13
+SW_M_NIN == <1@SW_V_NIN>
+SW_V_TRC == 14
+SW_M_TRC == <1@SW_V_TRC>
+; RETSTS primary values
+ST_C_BUG	= ^x8004	;Op failure... not used here (BUG)
+ST_C_NOOP	= ^x8009	;empty cmdlin (CD) NOOP ... switches set
+ST_C_SHOPRV	= ^x800d	;pound sign (CD #) EOP/mb~NFT (SWS ok)
+ST_C_HELP	= ^x8011	;Help operation EOP/mb~NFT (SWS ok)
+ST_C_SYNTAX	= ^x8014	;syntax... EOP
+ST_C_NOCHANGE	= ^x8018	;nochange (CD .)  NOOP / return if EOS
+ST_C_NEWDIR	= ^x801d	;new dir parsed (temp set new dir/ver)
+ST_C_DIRNEX	= ^x8020	;Op failure... dirnex
+ST_C_BUGCHECK	= ^x8024	;Internal consistency failure
+ST_C_BADCURDIR	= ^x8028	;Can't get/set current dir
+ST_C_HARDEX	= ^x802c	;Forced exit of CD process
+ST_C_SOFTEX	= ^x8031	;Soft exit of CD process (i.e. no message)
+
+GK_UPARROW = ^x101
+GK_DNARROW = ^x102
+GK_RTARROW = ^x103
+GK_LFARROW = ^x104
+GK_E1 = ^x105
+GK_E2 = ^x106
+GK_E3 = ^x107
+GK_E4 = ^x108
+GK_E5 = ^x109
+GK_E6 = ^x10a
+GK_F7 = ^x10b
+GK_F8 = ^x10c
+GK_F9 = ^x10d
+GK_F10 = ^x10e
+GK_F11 = ^x10f
+GK_F12 = ^x110
+GK_F13 = ^x111
+GK_F14 = ^x112
+GK_F15 = ^x113
+GK_F16 = ^x114
+GK_F17 = ^x115
+GK_F18 = ^x116
+GK_F19 = ^x117
+GK_F20 = ^x118
+GK_PF1 = ^x119
+GK_PF2 = ^x11a
+GK_PF3 = ^x11b
+GK_PF4 = ^x11c
+GK_KP0 = ^x11d
+GK_KP1 = ^x11e
+GK_KP2 = ^x11f
+GK_KP3 = ^x120
+GK_KP4 = ^x121
+GK_KP5 = ^x122
+GK_KP6 = ^x123
+GK_KP7 = ^x124
+GK_KP8 = ^x125
+GK_KP9 = ^x126
+GK_KPMINUS = ^x127
+GK_KPPERIOD = ^x128
+GK_KPCOMMA = ^x129
+GK_KPENTER = ^x12a
+
+.MACRO	retc	src=r0,?l1
+	blbs	src,l1
+	ret
+l1:
+.ENDM	retc
+
+.MACRO	rsbc	src=r0,?l1
+	blbs	src,l1
+	rsb
+l1:
+.ENDM	rsbc
+
+; Branch (Word) on low bit set
+.MACRO	BLBSW	-
+		SRC,DST,?LCL
+	BLBC	SRC,LCL
+	BRW	DST
+LCL:
+.ENDM	BLBSW
+
+.MACRO	SIGVSTA V1,V2,V3,V4,V5,V6,V7,V8,V9,V10
+  DBG_K_ACNT = 1
+	pushl	#SS$_OPCCUS!STS$M_INHIB_MSG	;eat a bogus PC/PSL
+  .irp	faoarg,<<v10>,<v9>,<v8>,<v7>,<v6>,<v5>,<v4>,<v3>,<v2>,<v1>>
+    .if	nb, <faoarg>
+	pushl	faoarg
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+  .endr
+	movl	#DBG_K_ACNT,r0
+.ENDM	SIGVSTA
+
+.MACRO	SIGVADD V1,V2,V3,V4,V5,V6,V7,V8,V9,V10
+  DBG_K_ACNT = 0
+  .irp	faoarg,<<v10>,<v9>,<v8>,<v7>,<v6>,<v5>,<v4>,<v3>,<v2>,<v1>>
+    .if	nb, <faoarg>
+	pushl	faoarg
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+  .endr
+  .IIF NE,DBG_K_ACNT,	addl	#DBG_K_ACNT,r0
+.ENDM	SIGVADD
+
+.MACRO	SIGVCOD V1,V2,V3,V4,V5,V6,V7,V8,V9,V10,?SYSNARGS,?FRCUSR,?EOSIG,?SOB
+	cmpzv	#STS$V_FAC_NO,#STS$S_FAC_NO,v1,#SYSTEM$_FACILITY
+	beql	SYSNARGS
+	cmpzv	#STS$V_FAC_NO,#STS$S_FAC_NO,v1,#RMS$_FACILITY
+	bneq	FRCUSR
+
+	;If V2 is blank, then substitute ^x10000001
+	.if	nb, <V2>
+	pushl	v2
+	.iff
+	pushl	#^x10000001
+	.endc
+	pushl	v1
+	addl	#2,r0
+	brw	EOSIG
+
+FRCUSR: ;If V2 present, use V2...V10, else supply V2=#0
+  DBG_K_ACNT = 0
+    .if	nb, <V2>
+  .irp	faoarg,<<v10>,<v9>,<v8>,<v7>,<v6>,<v5>,<v4>,<v3>,<v2>,<v1>>
+    .if	nb, <faoarg>
+	pushl	faoarg
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+  .endr
+    .iff
+	pushl	#0
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+	pushl	v1
+	DBG_K_ACNT = DBG_K_ACNT + 1
+	addl	#DBG_K_ACNT,r0
+	brw	EOSIG
+
+SYSNARGS:	;Get message & create that many null entries unless V2+ supplied
+  DBG_K_ACNT = 0
+    .if	nb, <V2>
+  .irp	faoarg,<<v10>,<v9>,<v8>,<v7>,<v6>,<v5>,<v4>,<v3>,<v2>,<v1>>
+    .if	nb, <faoarg>
+	pushl	faoarg
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+  .endr
+	addl	#DBG_K_ACNT,r0
+    .iff
+	pushl	r0		;preserve r0
+	clrl	-(SP)		;receives nargs
+	pushal	(SP)
+	pushl	v1
+	calls	#2,g^getmsgcnt	;get nargs (assume rational result)
+	popl	r1
+	addl3	#1,(SP)+,r0	;recover r0, include 'nargs' in counter
+	movl	r1,-(SP)	;save nargs (test nargs)
+	beql	EOSIG		;Nargs is 0 - we're set
+SOB:	movl	(SP),-(SP)	;just bubble it up
+	clrl	4(SP)		;clear prior lword
+	incl	r0		;include this arg in r0 count
+	sobgtr	r1,SOB		;bubbler for Nargs
+    .endc
+EOSIG:
+.ENDM	SIGVCOD
+
+.MACRO	SIGVEND V1,V2,V3,V4,V5,V6,V7,V8,V9,V10
+  DBG_K_ACNT = 0
+  .irp	faoarg,<<v10>,<v9>,<v8>,<v7>,<v6>,<v5>,<v4>,<v3>,<v2>,<v1>>
+    .if	nb, <faoarg>
+	pushl	faoarg
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+  .endr
+  .IIF NE,DBG_K_ACNT,	addl	#DBG_K_ACNT,r0
+.ENDM	SIGVEND
+
+.MACRO	SIGVEC	V1,V2,V3,V4,V5,V6,V7,V8,V9,V10
+	DBG_K_ACNT = 1
+	pushl	#SS$_OPCCUS!STS$M_INHIB_MSG	;eat a bogus PC/PSL
+  .irp	faoarg,<<v10>,<v9>,<v8>,<v7>,<v6>,<v5>,<v4>,<v3>,<v2>,<v1>>
+    .if	nb, <faoarg>
+	pushl	faoarg
+	DBG_K_ACNT = DBG_K_ACNT + 1
+    .endc
+  .endr
+	movl	#DBG_K_ACNT,r0
+.ENDM	SIGVEC
+
+.MACRO	SIGNAL	savsts
+    .if	nb,<savsts>
+	movl	(SP),savsts
+    .endc
+	calls	r0,g^LIB$SIGNAL
+.ENDM	SIGNAL
+
+.MACRO	case	source,displist,base=#0,type=b,?table,?etable
+	.iif ne %LENGTH(TYPE)-1, .ERROR 1;illegal case: type
+	.iif ne %LENGTH(TYPE)-1, .MEXIT
+	.iif eq %LOCATE(TYPE,<BWLbwl>)-6, .ERROR 1 ;illegal case: type
+	.iif eq %LOCATE(TYPE,<BWLbwl>)-6, .MEXIT
+	case'type	source,base,#<<etable-table>/2>-1
+table:	.IRP	dest,<displist>
+	.word	dest-table
+	.ENDR
+etable:
+.ENDM	case
+
+.macro	.PRVINIT,?dummy
+	clrq	readall
+	bbss	#PRV$V_READALL,readall,dummy
+dummy:
+.endm	.PRVINIT
+
+.macro	.READALL,enable=0,?tmplbl
+	movq	r0,-(SP)
+;        SYS$SETPRV  [enbflg] ,[prvadr] ,[prmflg] ,[prvprv]
+;	$setprv_s	-
+;		enbflg	=	#enable,-
+;		prvadr	=	readall,-
+;		prmflg	=	#0
+	clrq	-(SP)		;prvprv & prmflg
+	pushaq	readall		;prvadr
+	pushl	#enable		;enbflg
+	calls	#4,w^_setprv	;___quiet___ setprv routine
+	movq	(SP)+,r0
+.endm	.READALL
+;--
+
+	.psect	$tpastuff
+;++
+; TPA Parse table for command line main
+;--
+
+;	$INIT_STATE	state_table, key_table
+;	$STATE		[label]
+;	$TRAN		type[,label][,action][,mask][,msk-adr][,argument]
+;	$END_STATE
+;
+	$INIT_STATE	sttbl0,kytbl0
+
+; Main parse state ... delete quotes if present
+	$STATE		start
+	$TRAN		'"',start,do_op,,,OP_C_DEL
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST
+	$TRAN		TPA$_ANY,start
+
+; Process switches (w/abbreviation OK)
+	$STATE		switch
+	$TRAN		!_isswitch,switch
+	$TRAN		!_rmvsp,switch
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_RMV
+
+; Single special processing
+	$STATE		single
+	$TRAN		TPA$_BLANK,TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		':',TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		'/',TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		!_iseos,TPA$_EXIT,,ST_C_NOOP,retsts
+.IF DF,ODS5
+	$TRAN		!_isdot,setddir		;substitute, reset & go
+.IFF
+	$TRAN		!_isdot,TPA$_EXIT,,ST_C_NOCHANGE,retsts
+.ENDC
+	$TRAN		!_isddd,setddir		;substitute, reset & go
+	$TRAN		!_ispnd,TPA$_EXIT,,ST_C_SHOPRV,retsts
+	$TRAN		!_ispndn,TPA$_EXIT,,ST_C_SHOPRV,retsts
+	$TRAN		!_ispndx,TPA$_EXIT,,ST_C_SOFTEX,retsts
+	$TRAN		!_isqq,TPA$_EXIT,,ST_C_HELP,retsts
+	$TRAN		!_isque,TPA$_EXIT,,ST_C_HELP,retsts
+	$TRAN		!_isbsl,setddir		;substitute, reset & go
+	$TRAN		!_isdol,setddir		;substitute, reset & go
+	$TRAN		!_isat,setddir		;substitute, reset & go
+	$TRAN		'@',hardex		;pop any '@' escapees
+	$TRAN		<'~'>,hardex		;pop any '~' escapees
+	$TRAN		!_cleansl		;Clean out any leading '.\'
+	$TRAN		TPA$_LAMBDA		;continue testing
+
+; Personal ident testing
+	$STATE		prsid
+	$TRAN		!_isprsident,,isprsid	;check for personal IDENT
+	$TRAN		TPA$_LAMBDA		;continue testing
+
+; Logical testing
+	$STATE		tstlog
+	$TRAN		!_islogical,setddir,islog	;check for logical
+	$TRAN		TPA$_LAMBDA			;continue testing
+
+; String repair for all UNIX/MSDOS translations to VMS
+	$STATE		repair			;null state for reset & label
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_RST
+
+	$STATE		getnod			;extract device if present
+	$TRAN		!_caret_ANY,getnod
+	$TRAN		':'
+	$TRAN		TPA$_EOS,getdev,do_op,,,OP_C_RST	;all done
+	$TRAN		TPA$_ANY,getnod		;do all chars
+	$STATE					;Pick up second ':'
+	$TRAN		':',,do_op,,,OP_C_NOD	;found one!  Go do chop suey!
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST	;all done
+	$TRAN		TPA$_ANY,getnod		;do all chars
+
+	$STATE		getdev			;extract device if present
+	$TRAN		!_caret_ANY,getdev
+	$TRAN		':',,do_op,,,OP_C_DEV	;found one!  Go do chop suey!
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST	;all done
+	$TRAN		TPA$_ANY,getdev		;do all chars
+
+	$STATE					;force '\' to work right
+	$TRAN		!_isbsl,adjroot,do_op,,,OP_C_RST
+	$TRAN		TPA$_LAMBDA,adjroot
+
+	$STATE		forcerbreos		;force correct [] syntax
+	$TRAN		!_caret_ANY,forcerbreos
+	$TRAN		']'
+	$TRAN		TPA$_EOS,TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		TPA$_ANY,forcerbreos
+	$STATE
+	$TRAN		TPA$_EOS,ddscan,do_op,,,OP_C_RST
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_SYNTAX,retsts
+
+	$STATE		adjroot			;adjust rooting chars
+	$TRAN		'[',forcerbreos		;brackets exist... fix rest
+	$TRAN		'\',adjroot,do_op,,,OP_C_BRO	;force brackets in
+	$TRAN		'.',,do_op,,,OP_C_BRI	;ok for '..' and '.' first
+	$TRAN		'-',,do_op,,,OP_C_BRI		;ok for '-'
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_BRI	;ok for <eos>
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_BDI	;force '[.'...']'
+
+	$STATE		ddscan			;change all '..' to '-'
+	$TRAN		!_isa_dd,ddscan		;fixes '..'
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST
+	$TRAN		!_caret_ANY,ddscan
+	$TRAN		TPA$_ANY,ddscan
+
+	$STATE		bsscan
+	$TRAN		'\',,do_op,,,OP_C_DOT	;fixes '\' to '.'
+	$TRAN		TPA$_EOS,prsdev,do_op,,,OP_C_RST
+	$TRAN		!_caret_ANY,bsscan
+	$TRAN		TPA$_ANY,bsscan
+
+	$STATE		;States to edit 'xxxx\' (now 'xxxx.]')
+	$TRAN		']',,do_op,,,OP_C_BCK
+	$TRAN		TPA$_LAMBDA,bsscan
+	$STATE		;Backup to '.'
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_BCK
+	$STATE		;Delete the '.'		;;ODS5: wrong! maybe ok tho.
+	$TRAN		'.',,do_op,,,OP_C_DEL
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$STATE
+	$TRAN		']',bsscan
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_SYNTAX,retsts
+
+; ***!! Note: device name has been removed here...
+; Device recombination and personal device parsing & recombine
+	$STATE		prsdev
+	$TRAN		!_fmtnoddev	;Format node/device & personal
+	$TRAN		TPA$_LAMBDA	;continue testing
+
+; Actual setddir attempt
+	$STATE		setddir
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_NEWDIR,retsts
+
+; Hardex exit state
+	$STATE		hardex
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_HARDEX,retsts
+
+;++
+; Begin callable states
+;--
+;Skip a '^x' as a single character
+	$STATE		_caret_ANY
+	$TRAN		'^'
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE
+	$TRAN		TPA$_ANY,TPA$_EXIT
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+
+; Try to get switch values
+	$STATE		_isswitch
+	$TRAN		TPA$_BLANK,_isswitch
+	$TRAN		'/'
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE
+	$TRAN		TPA$_SYMBOL,,do_op,,,OP_C_UPC
+	$STATE
+	$TRAN		'AA',swautoans
+	$TRAN		'COM',swcom
+	$TRAN		'CSH',swcsh
+	$TRAN		'FULL',swful
+	$TRAN		'HOME',swhome
+	$TRAN		'INHIBIT',swinh
+	$TRAN		'LOG',swlog
+	$TRAN		'NOINHIBIT',swnin
+	$TRAN		'NOP',swnop	;required for '/' allowed processing
+	$TRAN		'PARTIAL',swpart
+	$TRAN		'POP',swpop
+	$TRAN		'PUSH',swpush
+	$TRAN		'TRACE',swtrc
+	$TRAN		'VERIFY_ONLY',swver
+
+	$STATE		swautoans
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_AUTO,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_AUTO,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_AUTO,switches
+
+	$STATE		swcom
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_COM,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_COM,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_COM,switches
+	$TRAN		'='
+	$STATE
+	$TRAN		TPA$_FILESPEC,,do_op,SW_M_COMDF,switches,OP_C_SCF
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_COM,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_COM,switches
+
+	$STATE		swcsh
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_CSH,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_CSH,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_CSH,switches
+
+	$STATE		swful
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_FUL!SW_M_LOG,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_FUL!SW_M_LOG,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_FUL!SW_M_LOG,switches
+
+	$STATE		swhome
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_HOME,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_HOME,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_HOME,switches
+
+	$STATE		swinh
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_INH,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_INH,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_INH,switches
+
+	$STATE		swtrc
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_TRC,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_TRC,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_TRC,switches
+
+	$STATE		swnin
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_NIN,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_NIN,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_NIN,switches
+
+	$STATE		swlog
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_LOG,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_LOG,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_LOG,switches
+
+	$STATE		swpart
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_PART,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_PART,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_PART,switches
+
+	$STATE		swpop
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_POP,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_POP,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_POP,switches
+
+	$STATE		swpush
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_PUSH,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_PUSH,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_PUSH,switches
+
+	$STATE		swver
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_VER,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_VER,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_VER,switches
+
+	$STATE		swnop
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,,,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,,,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+; Consume spaces at current token
+	$STATE		_rmvsp
+	$TRAN		TPA$_BLANK
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE		_rmvsp0
+	$TRAN		TPA$_BLANK,_rmvsp0
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT
+
+; Clean up .\.\.\, .\\x (.\\x causes a weird error & this is the easiest fix!)
+	$STATE		_cleansl
+	$TRAN		'.'
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT
+	$STATE
+	$TRAN		'\'
+	$STATE		__killsl
+	$TRAN		'\',__killsl
+	$TRAN		TPA$_LAMBDA,_cleansl,do_op,,,OP_C_RMV
+
+; Checking and repair of '..' to '-'
+	$STATE		_isa_dd
+	$TRAN		'.'
+	$STATE
+	$TRAN		'.',TPA$_EXIT,do_op,,,OP_C_DD
+
+; Format node/device & check for personal dev
+	$STATE		_fmtnoddev	;Format node/device & personal
+	$TRAN		TPA$_ANY,TPA$_EXIT,fmtnoddev
+
+; Personal ident format enforcement
+	$STATE		_isprsident		;check for personal IDENTs
+	$TRAN		TPA$_SYMBOL
+	$STATE
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+; Logical name checking
+	$STATE		_islogical		;check for LNM equiv
+	$TRAN		TPA$_ANY,_islogical
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+; Special character checking...
+	$STATE		_iseos		;check for '<eos>'
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_isdot		;check for '.[\]<eos>'
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+.IF DF,ODS5
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_FID
+.IFF
+	$TRAN		TPA$_EOS,TPA$_EXIT
+.ENDC
+	$TRAN		'\'
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_isddd		;check for '...[\]<eos>'
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_PAR
+
+	$STATE		_isque		;check for '?<eos>'
+	$TRAN		'?'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_isqq		;check for '??<eos>'
+	$TRAN		'?'
+	$STATE				;now require EOS
+	$TRAN		'?',,,SW_M_VERSID,switches
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_ispnd		;check for '#<eos>'
+	$TRAN		'#'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_ispndn		;check for '#{n}<eos>'
+	$TRAN		'#'		;required for success
+	$STATE				;now require <n>EOS
+	$TRAN		'0'		;allowable constant for dirchange
+	$TRAN		'1'		;allowable constant for dirchange
+	$TRAN		'2'		;allowable constant for dirchange
+	$TRAN		'3'		;allowable constant for dirchange
+	$TRAN		'4'		;allowable constant for dirchange
+	$TRAN		'5'		;allowable constant for dirchange
+	$TRAN		'6'		;allowable constant for dirchange
+	$TRAN		'7'		;allowable constant for dirchange
+	$TRAN		'8'		;allowable constant for dirchange
+	$TRAN		'9'		;allowable constant for dirchange
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_PND
+
+	$STATE		_ispndx		;check for '#*<eos>'
+	$TRAN		'#'		;required for success
+	$STATE				;now require <n>EOS
+	$TRAN		'*'		;do list operation
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_PND
+
+	$STATE		_isdol		;check for '$<eos>'
+	$TRAN		'$'		;required for success
+	$STATE				;now require EOS
+	$TRAN		'0'		;allowable constant for dirchange
+	$TRAN		'1'		;allowable constant for dirchange
+	$TRAN		'2'		;allowable constant for dirchange
+	$TRAN		'3'		;allowable constant for dirchange
+	$TRAN		'4'		;allowable constant for dirchange
+	$TRAN		'5'		;allowable constant for dirchange
+	$TRAN		'6'		;allowable constant for dirchange
+	$TRAN		'7'		;allowable constant for dirchange
+	$TRAN		'8'		;allowable constant for dirchange
+	$TRAN		'9'		;allowable constant for dirchange
+	$TRAN		'*'		;do select operation
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_DOL
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_DOL
+
+	$STATE		_isbsl		;check for '\<eos>'
+	$TRAN		'\'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_BSL
+
+	$STATE		_isat		;check for '[@|~]username<eos>'
+	$TRAN		'@'		;tran on leading @
+	$TRAN		<'~'>		;tran on leading ~
+	$STATE
+	$TRAN		TPA$_SYMBOL
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_AT
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL,,CD_IVIDENT,retstv
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_AT
+	$TRAN		TPA$_EOS,TPA$_FAIL
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL,,CD_IVIDENT,retstv
+
+	$END_STATE
+;----------------------END STATE TABLE------------------------------------------
+
+
+;++
+; TPA Parse table for chopping up 'dirtxt'
+;--
+
+	$INIT_STATE	sttbl1,kytbl1
+
+; Ancillary parse state ... chop 'dirtxt' to pieces
+	$STATE		chop
+	$TRAN		TPA$_EOS,TPA$_EXIT
+	$TRAN		'['
+	$TRAN		']',TPA$_EXIT
+	$TRAN		TPA$_LAMBDA
+
+	$STATE		diritm1
+	$TRAN		TPA$_EOS,TPA$_EXIT
+	$TRAN		']',TPA$_EXIT
+	$TRAN		'-',diritm1	;remove leading '-'
+	$TRAN		'.'		;remove leading '.'
+	$TRAN		TPA$_LAMBDA
+
+	$STATE		diritm2
+	$TRAN		TPA$_EOS,TPA$_EXIT
+	$TRAN		']',TPA$_EXIT
+	$TRAN		!_up,diritm2	;remove '.-'
+	$TRAN		!_dirid,diritm2,adddir
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT
+
+	$STATE		_up
+	$TRAN		'.'
+	$TRAN		'-',TPA$_EXIT
+	$STATE
+	$TRAN		'-',TPA$_EXIT
+
+	$STATE		_dirid
+	$TRAN		'.'
+	$TRAN		TPA$_LAMBDA
+	$STATE
+	$TRAN		TPA$_STRING
+	$TRAN		'*'
+	$TRAN		'%'
+	$TRAN		'-'
+	$TRAN		'_'
+	$TRAN		'$'
+	$STATE		_dirid2
+	$TRAN		TPA$_STRING,_dirid2
+	$TRAN		'*',_dirid2
+	$TRAN		'%',_dirid2
+	$TRAN		'-',_dirid2
+	$TRAN		'_',_dirid2
+	$TRAN		'$',_dirid2
+	$TRAN		']',TPA$_EXIT,do_op,,,OP_C_BCK
+	$TRAN		'.',TPA$_EXIT,do_op,,,OP_C_BCK
+
+	$END_STATE
+;----------------------END STATE TABLE------------------------------------------
+
+
+	.psect	$local
+;++
+; *** Local data storage, macros, etc.
+;--
+;---------------------END MACRO DEFINITIONS-------------------------------------
+
+
+argb0:	.blkb	TPA$K_LENGTH0	;space for argblk
+argb1:	.blkb	TPA$K_LENGTH0	;space for argblk
+
+protofab:	$fab		;FAB prototype for re-init
+tmpfab:		$fab		;for 'parse' operations
+FABSIZ = tmpfab-protofab
+
+.IF DF,ODS5
+protonam:	$naml
+tmpnam:		$naml
+ assume NAML$C_MAXRSS LE 4096
+NAMSIZ = NAML$C_BLN
+.IFF
+protonam:	$nam		;NAM prototype for re-init
+tmpnam:		$nam		;for 'parse' operations
+ assume NAM$C_MAXRSS LE 256
+NAMSIZ = NAM$C_BLN
+.ENDC
+
+rssstr:	.blkb	4096
+essstr:	.blkb	4096
+.IF DF,ODS5
+rssold:	.blkb	256
+essold:	.blkb	256
+.ENDC
+
+; Translation buffers --- NOTE: LENGTHS MUST BE EQUIVALENT!!
+; Primary translation buffer (Holds cmd string segment being parsed/executed)
+	.long		4096
+buffer:	.long		4096
+	.address	.+4
+	.blkb		4096
+
+; Secondary translation buffer (Holds first command string)
+	.long		4096
+cmdbuf:	.long		4096
+	.address	.+4
+	.blkb		4096
+
+; Temporary storage places for LNM xlat, etc.
+; Note: Lengths must be minimum size of buffer/cmdbuf
+	.long		4096
+tmp1:	.long		4096
+	.address	.+4
+	.blkb		4096
+	.long		4096
+tmp2:	.long		4096
+	.address	.+4
+	.blkb		4096
+	.long		4096
+tmp3:	.long		4096
+	.address	.+4
+	.blkb		4096
+
+; Used to hold a 'node' name
+	.long		64
+nodnam:	.long		0
+	.address	.+4
+	.blkb		64
+
+; Used to hold a 'device' name
+	.long		32
+devnam:	.long		0
+	.address	.+4
+	.blkb		32
+
+; Used to hold the username
+usrnam:	.long		0
+	.address	.+4
+	.blkb		16
+
+; Command file
+	.long		1024
+comfil:	.long		1024
+	.address	.+8
+ ;This is an oddball - space so returned caller can 'back up' the COMMDF str
+	.blkl
+	.blkb		1024
+
+; Blank descriptors for various uses
+dsc0:	.quad
+dsc1:	.quad
+dsc2:	.quad
+dsc3:	.quad
+
+; Used to hold directory names & flag values
+curdf0:	.long		0
+	.long		4096
+curd0:	.long		4096
+	.address	.+4
+	.blkb		4096
+curdf1:	.long		0
+	.long		4096
+curd1:	.long		4096
+	.address	.+4
+	.blkb		4096
+curdf2:	.long		0
+	.long		4096
+curd2:	.long		4096
+	.address	.+4
+	.blkb		4096
+prevf:	.long		0
+	.long		4096
+prev:	.long		4096
+	.address	.+4
+	.blkb		4096
+
+; return buffer block
+bufblk:	.long		12		;CALLx AP format list
+	.address	buffer,retsts
+	.address	curd0,curdf0
+	.address	curd1,curdf1
+	.address	prev,prevf
+	.address	vector,switches
+	.address	cmdbuf,comfil
+vector:	.blkl		16
+
+CDPB_L_NARGS==0@2
+CDPB_A_BUFFER==1@2
+CDPB_A_RETSTS==2@2
+CDPB_A_CURD0==3@2
+CDPB_A_CURDF0==4@2
+CDPB_A_CURD1==5@2
+CDPB_A_CURDF1==6@2
+CDPB_A_PREV==7@2
+CDPB_A_PREVF==8@2
+CDPB_A_VECTOR==9@2
+CDPB_A_SWITCHES==10@2
+CDPB_A_CMDBUF==11@2
+CDPB_A_COMFIL==12@2
+
+; Array of descriptors into 'dirtxt', and a counter into the array
+SEGMAX = 16
+segcnt:	.long
+segarr:	.blkq		SEGMAX
+seglst:			;build $FAOL list of arguments
+  $$$tmp = 0
+  .rept	SEGMAX
+	.address	segarr+$$$tmp
+  $$$tmp = $$$tmp+8
+  .endr
+
+retsts:		.long
+retstv:		.long
+switches:	.long
+lflags:		.long
+sprivs:		.blkq	;Saved privs
+readall:	.blkq
+dellst:	.long		0
+trnatt:	.long		LNM$M_CASE_BLIND
+attrib:	.long
+maxidx:	.long
+slist:	.long
+lnmlst:	.long		<LNM$_STRING@16>!256
+	.address	tmp2+8,tmp2
+lnmls2:	.long		<LNM$_ATTRIBUTES@16>!4
+	.address	attrib
+	.long		0
+	.long		<LNM$_MAX_INDEX@16>!4
+	.address	maxidx
+	.long		0,0
+gbltab:	.long	2
+constFF:.long	^xff
+
+syscom_chn:	.long	0
+syscom_crpen:	.long	0
+trmlst:	.long	32
+	.address	.+4
+	.long	-1,-1,-1,-1,-1,-1,-1,-1
+
+;
+;  Begin byte-aligned data area
+;
+syscom:	.ascid	/SYS$COMMAND/
+fildev:	.ascid	/LNM$FILE_DEV/
+cdidn:	.ascid	/CDI_/
+cdfmt:	.ascid	/CDF_/
+root:	.ascid	/[000000]/
+nulstr:	.ascid	//
+sysdsk:	.ascid	/SYS$DISK/
+prvdir:	.ascid	/LAST_DEFAULT_DIRECTORY/
+prvdr0:	.ascid	/CD$0/
+stkdir:	.ascid	/CD$!UL/		;CD$0...CD$9
+unavl:	.ascid	/Requested information unavailable/
+notdef:	.ascid	/not defined/
+defimg:	.ascic	/CD_USER/
+defsym:	.ascic	/CD_PROCESS/
+didfmt:	.ascid	/[!UL,!UL,!UL]/
+
+	.psect	$code
+;++
+;  Begin main CODE section
+;--
+
+;+
+;Utility routine: _setprv - __quiet__ replacement for SYS$SETPRV
+;
+; Note: this routine is needed because a simple attempt at a setprv call
+;       pops a security audit if:
+;		$ set audit /enable=priv=fail=setprv/alarm
+;		$  !use this to reverse it:
+;		$     set audit /disable=priv=fail=setprv/alarm
+;	Therefore, we actually go check available privs & subtract out the
+;	ones we can't have first, so we never actually ask for them to cause
+;	an audit to pop... we're not trying to avoid any "detection" here,
+;	just trying to avoid popping audits when doing "normal" usage of
+;	installed privilege.... kind of annoys system-manager types... :)
+;
+;-
+;       _SETPRV  [enbflg] ,[prvadr] ,[prmflg] ,[prvprv]
+.call_entry,	4,home_args=TRUE,-
+		preserve=<r2,r3,r4,r5,r6>,-
+		output=<r0,r1>,-
+		label=_setprv
+
+	movl	4(AP),r0
+	movl	12(AP),r2
+	movaq	@16(AP),r3
+	movaq	@8(AP),r1
+	beql	10$			;No prvadr
+	bisl3	(r1),4(r1),r4		;see if any prvs being requested
+	beql	10$			;Not asking for privs - won't alarm
+	bbs	#0,r0,20$		;Jump on enable
+	;This is a _disable_ call : never pops an audit
+10$:	$setprv_s	-
+		enbflg	=	4(AP),-
+		prvadr	=	@8(AP),-
+		prmflg	=	12(AP),-
+		prvprv	=	@16(AP)
+	ret
+20$:
+	clrq	-(SP)			;iosb / tmp prv quad
+	clrq	-(SP)			;imagpriv
+	clrq	-(SP)			;authpriv
+	moval	(SP),r4			;R4 is tmp space base ^
+	clrl	-(SP)			;term of JPI itmlst
+	clrl	-(SP)			;No return for imagpriv len
+	movaq	8(r4),-(SP)		;address to return image privs
+	pushl	#8!<JPI$_IMAGPRIV@16>
+	clrl	-(SP)			;No return for authpriv len
+	movaq	(r4),-(SP)		;address to return auth privs
+	pushl	#8!<JPI$_AUTHPRIV@16>
+	moval	(SP),r5			;Itmlst ^
+
+	clrq	-(SP)			;astprm, astadr
+	pushaq	16(r4)			;IOSB
+	pushal	(r5)			;itmlst
+	clrq	-(SP)			;prcnam, pidadr
+	clrl	-(SP)			;efn
+	calls	#7,g^sys$getjpiw;Get all the info
+	;we assume here that the getjpi worked: if it didn't we're probably
+	;pretty hosed over anyway...
+
+	movaq	@8(AP),r2		;Point @ desired privs
+
+	movq	(r2),16(r4)		;Prime the pump w/what user wants
+	bbs	#PRV$V_SETPRV,(r4),40$	;GO! if V_SETPRV auth'd
+	blbs	12(AP),30$		;don't use image privs for PERM
+	bisl	8(r4),(r4)
+	bisl	12(r4),4(r4)		;Add in image privs
+30$:	;chk to see if rqstd prvs go over auth'd msk
+	mcoml	(r4),8(r4)		;Can't ask for bits in 8( & 12(
+	mcoml	4(r4),12(r4)
+
+	bicl	8(r4),16(r4)		;clear out what user can't get for
+	bicl	12(r4),20(r4)		;  doing _actual_ request, therefore...
+
+40$:	$setprv_s	-		; ...this should NOT go Poof!
+		enbflg	=	4(AP),-
+		prvadr	=	16(r4),-
+		prmflg	=	12(AP),-
+		prvprv	=	@16(AP)
+
+	cmpl	r0,#SS$_NORMAL		;see if it succeeded as expected
+	bneq	60$			;Nope... just return any errors
+	cmpl	(r2),16(r4)		;see if what was asked for was same
+	bneq	50$			;  as what is allowed to be asked for
+	cmpl	4(r2),20(r4)		;     "     "    "
+	beql	60$			;     "     "    "
+50$:	movzwl	#SS$_NOTALLPRIV,r0	;and return notallpriv if different
+60$:	ret
+
+;+
+;Utility routine: backlink - retrieve the backlink of a FID from the XQP
+;
+; Note: this routine retrieves a backlink given a FID as input. RMS'
+;       $parse/$open doesn't do this for an open-by-fid operation... :(
+;-
+;       BACKLINK T_DVI.RB, FID.RW, BACKFID.WW
+.entry	backlink,	^xffc
+	movl	4(AP),r7		;unsigned char *t_dvi,
+	movl	8(AP),r8		;unsigned short int *fid,
+	movl	12(AP),r9		;unsigned short int *pfid)
+
+	clrl	-(SP)
+	clrl	-(SP)
+	moval	(SP),r10		;dsc$descriptor_s d_dev = { 0,0,0,0 };
+
+	subl	#FIB$S_FIBDEF+8,SP
+	moval	(SP),r11		;d_fib,fib
+	movl	#^x10e0000!FIB$S_FIBDEF,(r11)
+	moval	8(r11),4(r11)		;d_fib/fib
+	movc5	#0,#0,#0,#FIB$S_FIBDEF,@4(r11)
+
+	movab	1(r7),4(r10)
+	movzbl	(r7),(r10)
+
+	subl	#12,SP			;space for IOSB & chn
+	moval	(SP),r7			;trash t_dvi, point @iosb & chn
+	clrl	8(r7)
+	$assign_s	-
+		devnam	=	(r10),-
+		chan	=	8(r7)
+	blbs	r0,10$
+	ret
+10$:	movl	4(r11),r2
+	movw	(r8),FIB$W_FID_NUM(r2)
+	movw	2(r8),FIB$W_FID_SEQ(r2)
+	movw	4(r8),FIB$W_FID_RVN(r2)
+	clrl	-(SP)
+	clrl	-(SP)
+	pushaw	(r9)
+	pushl	#<ATR$C_BACKLINK@16>!ATR$S_BACKLINK
+	moval	(SP),r6			;point to itmlst
+
+	$qiow_s	-
+		chan = 8(r7),-
+		func = #IO$_ACCESS,-
+		iosb = (r7),-
+		p1 = (r11),-
+		p5 = r6
+	movl	r0,r3
+	$dassgn_s	-
+		chan	= 8(r7)
+	blbs	r3,20$
+	movl	r3,r0
+	ret
+20$:	blbs	(r7),30$
+	movzwl	(r7),r0
+30$:	ret
+
+;+
+;Utility routine: get_dirinfo - retrieve info on the designated directory
+;-
+;       GET_DIRINFO DIRSPEC.RQ,ALTDIRSPEC.WQ
+.entry	get_dirinfo,	^xffc
+	movl	4(AP),r8		;Dirspec.dsc ^
+	subl	#FAB$C_BLN,SP
+	moval	(SP),r9			;FAB ^
+	subl	#NAMSIZ,SP
+	moval	(SP),r10		;NAML ^
+	movc3	#FAB$C_BLN,protofab,(r9)
+	movc3	#NAMSIZ,protonam,(r10)
+	bisl	#FAB$M_NAM,FAB$L_FOP(r9)
+	movab	(r10),FAB$L_NAM(r9)
+.IF DF,ODS5
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+	movab	@4(r8),NAML$L_LONG_FILENAME(r10)
+	movw	(r8),NAML$L_LONG_FILENAME_SIZE(r10)
+	mnegl	s^#1,FAB$L_FNA(r9)
+.IFF
+	movb	#NAM$C_MAXRSS,NAM$B_ESS(r10)
+	movb	#NAM$C_MAXRSS,NAM$B_RSS(r10)
+	movab	rssstr,NAM$L_RSA(r10)
+	movab	essstr,NAM$L_ESA(r10)
+	movab	@4(r8),FAB$L_FNA(r9)
+	movb	(r8),FAB$B_FNS(r9)
+.ENDC
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,10$
+	ret
+10$:
+	.save_psect	local_block
+	.psect	$local
+didded:	.long
+didval:	.blkw	8
+didfao:	.ascid	/!AD:[!UL,!UL,!UL]/
+	.restore_psect
+	clrl	didded		;dir spec does not contain did's
+.IF DF,ODS5 ;Impossible if not ODS5
+	bbc	#NAML$V_DID,NAML$B_NMC(r10),20$
+	bisb	#1,didded
+.ENDC
+;NAM fields used intentionally here.... they overlay NAML for ODS5
+20$:	movc3	#6,NAM$W_DID(r10),didval
+	movl	8(AP),r7
+	movab	NAM$T_DVI(r10),r6
+
+.IF DF,ODS5 ;Rules are _entirely_ different for non-ODS5
+	blbs	didded,30$
+
+	movzbl	(r6)+,r5
+	movzwl	NAML$W_DID_NUM(r10),r2
+	movzwl	NAML$W_DID_SEQ(r10),r3
+	movzbl	NAML$B_DID_RVN(r10),r4
+	movzbl	NAML$B_DID_NMX(r10),r1
+	ashl	#16,r1,r1
+	bisl	r1,r2
+	$fao_s	-				;create source name
+		ctrstr = didfao,-
+		outlen = (r7),-
+		outbuf = (r7),-
+		p1 = r5,-
+		p2 = r6,-
+		p3 = r2,-
+		p4 = r3,-
+		p5 = r4
+	movl	#1,r0
+	ret
+.ENDC	;for non-ODS5, just automagically unDID the dir from the didval
+30$:	;Dirspec already didded... should un-did it now
+	clrl	-(SP)
+	clrl	-(SP)
+	clrl	-(SP)
+	moval	(SP),r5
+	movzbl	(r6)+,(r5)
+	movl	r6,4(r5)
+
+	pushal	8(r5)
+	clrl	-(SP)
+	pushaw	(r7)
+	pushal	(r7)
+	pushaw	didval
+	pushal	(r5)
+	calls	#6,g^LIB$FID_TO_NAME
+	blbs	r0,40$
+	ret
+40$:	;r7 describes DEVICENAME:[dir.dir.dir]dddir.DIR;1
+
+	;;;Now we need to re-$parse so we can locate the closing ']'
+	;;;  and the .DIR;1 peice.... then edit the junk & return it
+
+	movc3	#FAB$C_BLN,protofab,(r9)
+	movc3	#NAMSIZ,protonam,(r10)
+	bisl	#FAB$M_NAM,FAB$L_FOP(r9)
+	movab	(r10),FAB$L_NAM(r9)
+.IF DF,ODS5
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+	movab	@4(r7),NAML$L_LONG_FILENAME(r10)
+	movw	(r7),NAML$L_LONG_FILENAME_SIZE(r10)
+	mnegl	s^#1,FAB$L_FNA(r9)
+.IFF
+	movb	#NAM$C_MAXRSS,NAM$B_RSS(r10)
+	movb	#NAM$C_MAXRSS,NAM$B_ESS(r10)
+	movab	rssstr,NAM$L_RSA(r10)
+	movab	essstr,NAM$L_ESA(r10)
+	movab	@4(r7),FAB$L_FNA(r9)
+	movb	(r7),FAB$B_FNS(r9)
+.ENDC
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,50$
+	ret
+50$:	;;; Now we're $parse'd --- need to edit the returned data
+.IF DF,ODS5
+	movl	NAML$L_LONG_DIR(r10),r2
+	movl	NAML$L_LONG_DIR_SIZE(r10),r3
+	decl	r3
+	movb	#^a/./,(r2)[r3]		;Poke last ']' to '.'
+	movl	NAML$L_LONG_DEV(r10),r2
+	movl	NAML$L_LONG_TYPE(r10),r3
+.IFF
+	movl	NAM$L_DIR(r10),r2
+	movzbl	NAM$B_DIR(r10),r3
+	decl	r3
+	movb	#^a/./,(r2)[r3]		;Poke last ']' to '.'
+	movl	NAM$L_DEV(r10),r2
+	movl	NAM$L_TYPE(r10),r3
+.ENDC
+	subl	r2,r3
+	addw3	#1,r3,(r7)
+	movc3	r3,(r2),@4(r7)
+	movb	#^a']',(r3)
+	movl	#1,r0
+	ret
+
+.IF DF,ODS5
+;+
+;Utility routine: short_dirspec
+;-
+;       SHORT_DIRSPEC DIRSPEC.RQ,OUTDIRSPEC.WQ,OUTDIRLEN.WW
+.entry	short_dirspec,	^xffc
+	movl	4(AP),r8		;Dirspec.dsc ^
+	subl	#FAB$C_BLN,SP
+	moval	(SP),r9			;FAB ^
+	subl	#NAML$C_BLN,SP
+	moval	(SP),r10		;NAML ^
+	movc3	#FAB$C_BLN,protofab,(r9)
+	movc3	#NAML$C_BLN,protonam,(r10)
+	bisl	#FAB$M_NAM,FAB$L_FOP(r9)
+	movab	(r10),FAB$L_NAM(r9)
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+	movb	#NAM$C_MAXRSS,NAML$B_RSS(r10)
+	movb	#NAM$C_MAXRSS,NAML$B_ESS(r10)
+	movab	rssold,NAML$L_RSA(r10)
+	movab	essold,NAML$L_ESA(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+	movab	@4(r8),NAML$L_LONG_FILENAME(r10)
+	movw	(r8),NAML$L_LONG_FILENAME_SIZE(r10)
+	mnegl	s^#1,FAB$L_FNA(r9)
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,10$
+	bisb	#NAML$M_SYNCHK,NAML$B_NOP(r10)	;;99.08.12
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,10$
+	ret
+10$:	;now ESA is short form
+	subl3	NAML$L_ESA(r10),NAML$L_DIR(r10),r6
+	movzbl	NAML$B_DIR(r10),r0
+	addl	r0,r6
+;;;PRINTF <Hacked ESA is now '!AF'>,r6,NAML$L_ESA(r10)
+	moval	@8(AP),r7
+	movc5	r6,essold,#0,(r7),@4(r7)
+	tstl	12(AP)
+	beql	20$
+	subl3	r0,r6,r1
+	movw	r1,@12(AP)
+20$:	movzwl	#SS$_NORMAL,r0
+	ret
+.ENDC
+
+
+;+
+;Utility routine: special_dir_compare
+;-
+;       SPECIAL_DIR_COMPARE DIRSPEC1.RQ,DIRSPEC2.RQ
+.entry	special_dir_compare,^xffc
+	moval	@4(AP),r6
+	moval	@8(AP),r7
+	pushl	r7
+	pushl	r6
+	calls	#2,g^str$case_blind_compare
+	tstl	r0
+	bneq	10$				;No match... try special
+	ret
+10$:	subl	#16,SP				;space for 2 descriptors
+	movl	(r7),8(SP)
+	movl	4(r7),12(SP)
+	moval	8(SP),r7
+	movl	(r6),(SP)
+	movl	4(r6),4(SP)
+	moval	(SP),r6
+	;There... now we can hack the descriptors
+	cmpb	@4(r6),@4(r7)
+	bneq	20$				;if eql, then !underscore issue
+	ret					;orig result still there
+;;Now... if there's 1 leading '_' -- go rip it off & retry compare
+20$:	cmpb	#^A'_',@4(r6)
+	bneq	30$
+	decl	(r6)
+	incl	4(r6)
+	brb	40$
+30$:	cmpb	#^A'_',@4(r7)
+	bneq	50$
+	decl	(r7)
+	incl	4(r7)
+40$:	pushl	r7
+	pushl	r6
+	calls	#2,g^str$case_blind_compare
+50$:	ret
+
+;+
+; TPARSE action routines
+;-
+; Perform an operation by operation number
+.call_entry,	9,home_args=TRUE,-
+		preserve=<r2,r3,r4,r5,r6>,-
+		output=<r0,r1>,-
+		label=do_op
+;.entry	do_op,^m<r2,r3,r4,r5,r6>
+.if ndf,ALPHA
+	movl	AP,r6
+.iff
+	movl	4(AP),r6			;a bogus AP now
+.endc
+	movzbl	TPA$L_PARAM(r6),r2		;only low byte is used
+	case	r2,-
+		<op_bsl,op_rst,op_dol,op_dd,op_dev,op_bri,op_bro,op_bdi,-
+		 op_dot,op_del,op_rmv,op_bck,op_at,op_pnd,op_scf,op_nod,-
+		 op_upc,op_fid,op_par>,-
+		base=#1
+	$exit_s	-
+		code	=	#SS$_BUGCHECK
+
+op_bsl:	;'\<eos>'
+	movc3	root,@root+4,@buffer+4
+	movw	root,buffer			;copy '[000000]' into place
+
+op_rst:	;reset operation
+	movzwl	buffer,TPA$L_STRINGCNT(r6)	;and reset parser
+	movab	@buffer+4,TPA$L_STRINGPTR(r6)
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_scf:	;Store Command File Name
+	movw	TPA$L_TOKENCNT(r6),comfil
+	movc3	TPA$L_TOKENCNT(r6),@TPA$L_TOKENPTR(r6),@comfil+4
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_pnd:	;'#{n|*}<eos>' (the {} is forced by the tparse table)
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to <eos>
+	decl	r3				;backup 1 char
+	clrl	r2				;use translation 0 for now
+	xorb3	(r3),#^a/0/,r2			;change decimal digit to BIN
+	bsbw	dol_dmp_prv			;go try to get translation
+20$:	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_dol:	;'$[n]<eos>'
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to <eos>
+	decl	r3				;backup 1 char
+	clrl	r2				;use translation 0 for now
+	cmpb	(r3),#^a/$/			;is it the "$" character?
+	beql	10$				;go do it
+	xorb3	(r3),#^a/0/,r2			;change decimal digit to BIN
+	bsbw	dol_set_prv			;go try to get translation
+10$:	clrw	buffer				;blast to 'no prev dir' state
+	movab	buffer+8,buffer+4		;reset pointers
+	blbc	prevf,20$			;no previous dir found ok
+	cmpl	r2,#10				;is r2 flag value for nochange?
+	beql	15$
+	bbss	r2,dellst,15$			;Put CDn index into del lst
+15$:	movzwl	prev,buffer
+	movc3	prev,@prev+4,@buffer+4		;copy prev dir as target
+20$:	brw	op_rst				;reset the parser
+
+op_at:	;'@username<eos>' or '~username<eos>'
+	movq	TPA$L_TOKENCNT(AP),-(SP)
+	incl	buffer+4
+	movq	usrnam,TPA$L_TOKENCNT(AP)	;start with 'self'
+	decw	buffer				;rmv leading @ | ~
+	beql	10$
+	movq	buffer,TPA$L_TOKENCNT(AP)	;use exisiting
+10$:	movl	buffer-4,buffer			;reset max length
+	movab	buffer+8,buffer+4		;reset pointers
+	pushaw	buffer				;place to return length
+	pushaq	buffer				;place to stuff result
+	pushaq	TPA$L_TOKENCNT(AP)		;username to look 4
+	calls	#3,w^uai_dir			;try to pop2 user target dir
+	movq	(SP)+,TPA$L_TOKENCNT(AP)
+	blbs	r0,30$
+	cmpl	r0,#RMS$_RNF			;see if username was bogus
+	bneq	20$
+	movl	#CD_USERNF,r0
+20$:	movl	r0,retstv			;save completion sts
+	ret					;let uai_dir fail the transit
+30$:	brw	op_rst				;reset the parser
+
+op_dd:	;'..'  --> '-'
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to 'after ..'
+	movab	-2(r3),r2			;point to 'before ..'
+	movb	#^a/-/,(r2)+			;change to '-.'
+	movab	(r2),TPA$L_STRINGPTR(r6)	;reset parser to relocated str
+	movc3	r1,(r3),(r2)			;slide string back a char
+	decw	buffer				;note the deduction
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_dev:	;Used to remove chunk of buffer & insert to devnam
+	;state is:	current token = ':'
+	;		current string is all past ':'
+	movzwl	buffer,r0			;get total length
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	subl3	r1,r0,r2			;sizeof 'dev:'
+	subl	r2,buffer			;remove it from the buffer size
+	decl	r2				;sizeof 'dev'
+	movw	r2,devnam			;set devnam descriptor up
+	movc3	r2,@buffer+4,@devnam+4		;copy device name
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to 'after :'
+	movab	@buffer+4,r2			;point to start of buffer
+	movc3	r1,(r3),(r2)			;slide string back -dev
+	brw	op_rst				;reset the parser
+
+op_bdi:	;insert '[.'...']' to buffer
+	movab	@buffer+4,r2
+	movc3	buffer,(r2),1(r2)		;scoot in 1 char
+	incw	buffer				;add it in to the buffer cnt
+	movb	#^a/./,@buffer+4		;insert leading '.'
+
+op_bri:	;Insert '['...']' to buffer
+	movab	@buffer+4,r2
+	movc3	buffer,(r2),1(r2)		;scoot in 1 char
+	incw	buffer				;add it in to the buffer cnt
+
+op_bro:	;Overwrite '['... insert ']' to buffer
+	movzwl	buffer,r3			;get current buffersize
+	addl3	#1,r3,buffer			;add in future ']'
+	movab	@buffer+4,r2			;get first char
+	movb	#^a/[/,(r2)			;overwrite '[' into buffer
+	movb	#^a/]/,(r2)[r3]			;insert ']' into buffer
+	brw	op_rst				;reset the parser
+
+op_dot:	;change char to '.'
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to 'after char'
+	movab	b^-1(r3),r2			;point to 'before char'
+	movb	#^a/./,(r2)+			;change to '-.'
+	movab	(r2),TPA$L_STRINGPTR(r6)	;reset parser to 'fixed' str
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_del:	;delete matched char
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to 'after char'
+	movab	b^-1(r3),r2			;point to 'at char'
+	movab	(r2),TPA$L_STRINGPTR(r6)	;reset parser to relocated str
+	movc3	r1,(r3),(r2)			;slide string back a char
+	decw	buffer				;note the deduction
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_rmv:	;delete to BOL
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to 'rest_of_line'
+	movab	@buffer+4,r2			;point to new 'start_of_line'
+	subl3	r2,r3,r4	   		;get sizeof removal
+	beql	10$				;no move needed
+	movab	(r2),TPA$L_STRINGPTR(r6)	;reset parser to relocated str
+	pushl	r4				;save sizeof removal
+	movc3	r1,(r3),(r2)			;slide string back a char
+	popl	r4				;recover sizeof removal
+	subw	r4,buffer			;note the deduction
+10$:	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_bck:	;back the parser up one char (known to exist)
+	incl	TPA$L_STRINGCNT(r6)		;note additional char
+	decl	TPA$L_STRINGPTR(r6)		;backup one char
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_nod:	;Used to remove chunk of buffer & insert to nodnam
+	;state is:	current token = ':'
+	;		current string is all past '::'
+	movzwl	buffer,r0			;get total length
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	subl3	r1,r0,r2			;sizeof 'node::'
+	subl	r2,buffer			;remove it from the buffer size
+	movw	r2,nodnam			;set nodnam descriptor up
+	movc3	r2,@buffer+4,@nodnam+4		;copy node name INCLUDING '::'!
+	movl	TPA$L_STRINGCNT(r6),r1		;get sizeof remaining string
+	movab	@TPA$L_STRINGPTR(r6),r3		;point to 'after :'
+	movab	@buffer+4,r2			;point to start of buffer
+	movc3	r1,(r3),(r2)			;slide string back -dev
+	brw	op_rst				;reset the parser
+
+op_upc:	;Uppercase current token & back parser up
+	pushl	TPA$L_TOKENPTR(r6)		;token address
+	pushl	TPA$L_TOKENCNT(r6)		;token length
+	moval	(SP),r0
+	pushl	r0
+	pushl	r0
+	calls	#2,g^STR$UPCASE
+	addl	#8,SP
+	subl	TPA$L_TOKENCNT(r6),TPA$L_STRINGPTR(r6)
+	addl	TPA$L_TOKENCNT(r6),TPA$L_STRINGCNT(r6)
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+op_fid:	;'.' operator.... used to FID/unFID current directory
+.IF DF,ODS5
+	movl	curd1-4,curd1
+	pushaq	curd1			;try to get current directory
+	calls	#1,w^get_current_directory
+	movl	r0,curdf1		;stuff flags w/result code
+	blbs	r0,20$			;all is OK... keep trying
+10$:	movl	r0,retstv			;save completion sts
+	ret
+20$:	movl	curd2-4,curd2
+	pushaq	curd2			;Resultant info string (fidded or exp'd)
+	pushaq	curd1
+	calls	#2,get_dirinfo		;Collect dir info for this dir
+	blbc	r0,10$
+	blbs	didded,30$		;Alr did'd
+	movzwl	curd2,buffer
+	movc3	curd2,@curd2+4,@buffer+4	;copy new dir as target
+	brw	op_rst				;reset the parser
+30$:	movzwl	curd2,buffer
+	movc3	curd2,@curd2+4,@buffer+4	;copy new dir as target
+	movq	curd1,TPA$L_TOKENCNT(AP)	;use exisiting
+	brw	op_rst				;reset the parser
+.IFF
+	;Just ignore it... we shouldn't be here anyway...
+	movzbl	#SS$_NORMAL,r0
+	ret
+.ENDC
+
+op_par:	;'...' operator.... FORCE use of parent DIR
+	movl	curd1-4,curd1
+	pushaq	curd1			;try to get current directory
+	calls	#1,w^get_current_directory
+	movl	r0,curdf1		;stuff flags w/result code
+	blbs	r0,20$			;all is OK... keep trying
+10$:	movl	r0,retstv			;save completion sts
+	ret
+20$:	movl	curd2-4,curd2
+	pushaq	curd2			;Resultant info string (fidded or exp'd)
+	pushaq	curd1
+	calls	#2,get_dirinfo		;Collect dir info for this dir
+	blbc	r0,10$
+
+	movl	curd2-4,curd2
+
+	clrl	-(SP)			;acpsts
+	clrl	-(SP)
+	pushaw	curd2			;
+	pushaq	curd2			;Result of a fid-to-name
+	pushaw	didval
+	pushaq	sysdsk
+	calls	#6,g^LIB$FID_TO_NAME
+	blbc	r0,10$
+
+;curd2 now contains DEVICENAME:[dir.dir.dir]dddir.DIR;1
+
+	movl	curd1-4,curd1
+	pushaq	curd1			;Resultant info string (fidded or exp'd)
+	pushaq	curd2
+	calls	#2,get_dirinfo		;Collect dir info for this SPEC
+	blbc	r0,10$
+
+	movzwl	curd1,buffer		;Should be didd'd ??
+	movc3	curd1,@curd1+4,@buffer+4	;copy new dir as target
+	brw	op_rst				;reset the parser
+
+.call_entry,	3,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=uai_dir
+;.entry	uai_dir,	^xffc
+;	p1=(username.dsc)
+;	p2=(target-buffer descr)
+;	p3=(return modified buflen)
+	subl	#32,SP
+	pushab	(SP)
+	movl	#32,-(SP)		;create descr
+	movab	(SP),r8			;points to defdev descr
+	subl	#64,SP
+	pushab	(SP)
+	movl	#64,-(SP)		;create descr
+	movab	(SP),r9			;points to defdir descr
+
+	clrl	-(SP)			;tail the itmlst
+	clrl	-(SP)			;no retlen
+	pushab	@4(r9)			;bufadr for defdir
+	pushl	#<UAI$_DEFDIR@16>!64	;itmcode|len
+	clrl	-(SP)			;no retlen
+	pushab	@4(r8)			;bufadr for defdev
+	pushl	#<UAI$_DEFDEV@16>!32	;itmcode|len
+	moval	(SP),r5
+	.READALL 1			;Flip on readall if possible
+	$getuai_s	-
+		usrnam	=	@4(AP),-
+		itmlst	=	(r5)
+	.READALL 0			;Turn readall off again
+	blbs	r0,20$
+	ret
+10$:	movzwl	#SS$_BUFFEROVF,r0
+	ret
+20$:	movab	@4(r8),r0
+	movzbl	(r0)+,(r8)
+	movab	(r0),4(r8)
+	movab	@4(r9),r0
+	movzbl	(r0)+,(r9)
+	movab	(r0),4(r9)
+	movq	@8(AP),r6
+	movzwl	r6,r6
+	movzwl	(r8),r10
+	movc5	r10,@4(r8),#0,r6,(r7)
+	subl	r10,r6
+	blss	10$
+	movzwl	(r9),r11
+	movc5	r11,@4(r9),#0,r6,(r7)[r10]
+	subl	r11,r6
+	blss	10$
+	addl3	r10,r11,r3		;compute total length
+	movw	r3,@12(AP)		;write resultant length
+	movl	#1,r0
+	ret
+
+; Test for personal device
+.call_entry,	1,-
+		preserve=<r2,r3,r4,r5>,-
+		output=<r0,r1>,-
+		label=fmtnoddev
+;.entry	fmtnoddev,^m<r2,r3,r4,r5>
+	tstw	devnam
+	bneq	20$				;there is one...
+	tstw	nodnam
+	bneq	10$				;there is one...
+	clrl	r0				;fail this state
+	ret
+10$:	brw	copy_noddev
+20$:	movzwl	cdfmt,tmp1
+	movc3	cdfmt,@cdfmt+4,@tmp1+4
+	movq	tmp1,r2
+	movzwl	r2,r2
+	movc3	devnam,@devnam+4,(r3)[r2]
+	addl	devnam,tmp1
+
+	movl	tmp2-4,tmp2		;force max length
+	pushl	gbltab
+	pushaw	tmp2
+	pushaq	tmp2
+	pushaq	tmp1
+	calls	#3,g^LIB$GET_SYMBOL	;try to get an equivalence
+	blbs	r0,30$
+	brw	copy_noddev
+30$:	;got a translation (tmp2).... now $FAO it!
+	movc3	buffer,@buffer+4,@tmp1+4
+	movzwl	buffer,tmp1		;copy user data to tmp1
+ ;---here: chop tmp1 into pieces & format it with tmp2
+
+; local init
+	clrl	segcnt		;no segments present yet
+	clrl	r0		;counter
+	movaq	segarr,r1
+40$:	movq	nulstr,(r1)[r0]	;preset to be 'null' string
+	aoblss	#SEGMAX,r0,40$	;waste the descriptor array
+
+; TPA init
+	movc5	#0,#0,#0,#TPA$K_LENGTH0,argb1
+	moval	argb1,r2
+	movl	#TPA$K_COUNT0,TPA$L_COUNT(r2)
+	movzwl	tmp1,TPA$L_STRINGCNT(r2)
+	movab	@tmp1+4,TPA$L_STRINGPTR(r2)
+
+; call TPA again to chop up the user data string
+	pushab	kytbl1
+	pushab	sttbl1
+	pushal	argb1
+.if ndf,ALPHA
+	calls	#3,G^LIB$TPARSE			;result is irrelevant
+.iff
+	calls	#3,G^LIB$TABLE_PARSE		;result is irrelevant
+.endc
+	bsbw	fmtprsdev
+	blbc	r0,60$			;oops!
+	tstl	segcnt			;were there any segments?
+	beql	50$
+	bisl	#FL_M_PRSDEV,w^lflags	;set prsdev flag .. we formatted 1
+
+;;The following section reinserts a supplied nodename
+	movzwl	nodnam,r0			;length of node name
+	beql	50$				;Skip if no nodnam present
+	movzwl	buffer,r1			;current length of dirtxt
+	addl3	r0,r1,buffer			;build new length
+	movab	@buffer+4,r2			;source address
+	movab	(r2)[r0],r3			;target address
+	pushl	r0
+	pushl	r2
+	movc3	r1,(r2),(r3)			;move dirtxt
+	movl	(SP),r2				;recover r2
+	movl	4(SP),r0			;recover r0
+	movc3	r0,@nodnam+4,(r2)		;move node txt
+	popl	r2
+
+50$:;reset parser
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+  	movl	4(AP),r0		;Get TPARSE block address
+.endc
+	movzwl	buffer,TPA$L_STRINGCNT(r0)	;and reset parser
+	movab	@buffer+4,TPA$L_STRINGPTR(r0)
+	movzbl	#SS$_NORMAL,r0
+	ret
+60$:;	brw	copy_noddev		;try to do it w/o formatting
+copy_noddev:
+	movzwl	devnam,r0			;length of device name
+	beql	10$				;Skip if no devnam present
+	movzwl	buffer,r1			;current length of dirtxt
+	incl	r0
+	addl3	r0,r1,buffer			;build new length
+	movab	@buffer+4,r2			;source address
+	movab	(r2)[r0],r3			;target address
+	pushl	r0
+	pushl	r2
+	movc3	r1,(r2),(r3)			;move dirtxt
+	movl	(SP),r2				;recover r2
+	movl	4(SP),r0			;recover r0
+	movc3	r0,@devnam+4,(r2)		;move devtxt
+	popl	r2
+	subl3	#1,(SP)+,r0			;recover len-1 of devnam
+	movb	#^a/:/,(r2)[r0]			;re-insert ':'
+10$:
+;;The following section reinserts a supplied nodename
+	movzwl	nodnam,r0			;length of node name
+	beql	20$				;Skip if no nodnam present
+	movzwl	buffer,r1			;current length of dirtxt
+	addl3	r0,r1,buffer			;build new length
+	movab	@buffer+4,r2			;source address
+	movab	(r2)[r0],r3			;target address
+	pushl	r0
+	pushl	r2
+	movc3	r1,(r2),(r3)			;move dirtxt
+	movl	(SP),r2				;recover r2
+	movl	4(SP),r0			;recover r0
+	movc3	r0,@nodnam+4,(r2)		;move node txt
+	popl	r2
+20$:
+;reset parser
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+  	movl	4(AP),r0		;Get TPARSE block address
+.endc
+	movzwl	buffer,TPA$L_STRINGCNT(r0)	;and reset parser
+	movab	@buffer+4,TPA$L_STRINGPTR(r0)
+	movzbl	#SS$_NORMAL,r0
+	ret
+
+fmtprsdev:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>;,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	movl	buffer-4,buffer		;restore max buflen
+	$FAOL_S	-
+		ctrstr	=	tmp2,-
+		outlen	=	buffer,-
+		outbuf	=	buffer,-
+		prmlst	=	seglst
+	cmpb	@buffer+4,#^a/@/	;is it an indirect image?
+	bneq	10$
+	pushaw	buffer			;place to write resulting length
+	pushaq	buffer			;this is the control string (&retbuf!)
+	pushaq	devnam			;this is the initiating devnam
+	calls	#3,w^userimg		;go activate & call appropos user image
+10$:	rsb
+
+;p1 = devnam descr that started this garbage
+;p2 = fao'd buffer result & return buffer
+;	Input format : '@[[image][+symbol]=]fao-result-text'
+;	Output format: <valid VMS target directory to attempt>
+;p3 = return length of altered buffer contents
+;Argument list to user process will be:
+;	p1=(FAO resultant descriptor)
+;	p2=(invoking devnam)
+;	p3=(target-buffer descr)
+;	p4=(return modified buflen)
+;.entry	userimg,	^xffc		;saves ALL registers
+.call_entry,	3,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=userimg
+	movq	@8(AP),r8		;r8'r9 descr
+	movzwl	r8,r8			;strip descrip
+	decw	r8			;i.e. rmv the '@'
+	incl	r9			;r8'r9 point to remainder
+	movab	defimg,r6		;r6->img ascic
+	movab	defsym,r7		;r7->sym ascic
+	locc	#^a/=/,r8,(r9)		;search for '='
+	bneq	10$			;i.e. FOUND the =
+	movq	r8,r10			;r10'r11 = userdata descr
+	brw	777$			;dispatch the image lookup & call
+10$:	movq	r0,r10			;r10'r11 = userdata descr
+	incl	r11
+	decl	r10			;offset for the '=' located
+	movq	r0,r4			;copy of located '=xxxxx' descr
+	locc	#^a/+/,r8,(r9)		;search for '+' ... symbol override
+	bneq	30$			;i.e. FOUND the +
+	subl3	r9,r5,r0		;form imagename length
+	beql	20$			;no imagename
+	movab	-1(r9),r6
+	movb	r0,(r6)			;write ascic of imgnam
+20$:	brw	777$			;dispatch the image lookup & call
+30$:	subl3	r9,r1,r2		;compute length prior '+'
+	beql	40$			;no imagename override
+	movab	-1(r9),r6
+	movb	r2,(r6)			;write ascic of new imgnam
+;now compute symbolname from loca of the '+' (in r0'r1)
+40$:	subl3	r1,r5,r4		;r4 --> length of symbolname
+	decl	r4			;strip leading '+'
+	beql	50$			;i.e. no symbolname
+	movab	(r1),r7
+	movb	r4,(r7)			;convert new symbol to ascic
+50$:
+;	brw	777$
+777$:	;locate & transfer to user reformatter
+	movab	1(r6),-(SP)
+	movzbl	(r6),-(SP)
+	movaq	(SP),r6			;descriptorize .ascid @r6
+	movab	1(r7),-(SP)
+	movzbl	(r7),-(SP)
+	movaq	(SP),r7			;descriptorize .ascid @r7
+	pushal	(r6)			;return address over r6 descr
+	pushaq	(r7)
+	pushaq	(r6)
+	calls	#3,g^LIB$FIND_IMAGE_SYMBOL
+	blbs	r0,800$
+	ret				;just shoo it off 4now
+800$:	movq	r10,(r7)		;overwrite symbol descr w/userdata
+	pushaw	@12(AP)			;target retlen
+	pushaq	@8(AP)			;target buffer
+	pushaq	devnam			;invoking devnam
+	pushaq	(r7)			;fao result
+	movaq	@8(AP),r0		;point to passed descr
+	movl	-4(r0),(r0)		;reset the output descr
+	calls	#4,@(r6)		;call user routine
+	ret
+
+;.entry	adddir,	^m<r2,r3,r4,r5>
+.call_entry,	5,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=adddir
+	movl	segcnt,r0	
+	cmpl	segcnt,#SEGMAX
+	blssu	20$
+10$:	movzwl	#SS$_NORMAL,r0
+	ret
+20$:	movaq	segarr,r1
+	movaq	(r1)[r0],r2
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+	movl	4(AP),r0
+.endc
+	movq	TPA$L_TOKENCNT(r0),(r2)
+	incl	segcnt
+	brb	10$
+
+; Test for personal ident
+;.entry	isprsid,^m<r2,r3,r4,r5>
+.call_entry,	1,-
+		preserve=<r2,r3,r4,r5>,-
+		output=<r0,r1>,-
+		label=isprsid
+	movzwl	cdidn,tmp1
+	movc3	cdidn,@cdidn+4,@tmp1+4
+	movq	tmp1,r2
+	movzwl	r2,r2
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+	movl	4(AP),r0
+.endc
+	movc3	TPA$L_TOKENCNT(r0),@TPA$L_TOKENPTR(r0),(r3)[r2]
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+	movl	4(AP),r0
+.endc
+	addl	TPA$L_TOKENCNT(r0),tmp1
+
+	movl	tmp2-4,tmp2		;force max length
+	pushl	gbltab
+	pushaw	tmp2
+	pushaq	tmp2
+	pushaq	tmp1
+	calls	#3,g^LIB$GET_SYMBOL	;try to get an equivalence
+	blbs	r0,10$
+	ret
+10$:	;got a translation.... now copy it!
+	movc3	tmp2,@tmp2+4,@buffer+4
+	movzwl	tmp2,buffer
+;reset parser
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+  	movl	4(AP),r0		;Get TPARSE block address
+.endc
+	movzwl	buffer,TPA$L_STRINGCNT(r0)	;and reset parser
+	movab	@buffer+4,TPA$L_STRINGPTR(r0)
+	movzbl	#SS$_NORMAL,r0
+	ret
+;	brw	op_rst
+
+; Test for LNM equivalence
+;.entry	islog,^m<r2,r3,r4,r5>
+.call_entry,	5,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=islog
+	pushaq	tmp2				;place to dump translation
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+	movl	4(AP),r0
+.endc
+	pushaq	TPA$L_TOKENCNT(r0)		;lnm to look for
+	calls	#2,w^get_lnm			;try to translate it
+	blbs	r0,10$
+	ret
+; copy translation
+10$:	movc3	tmp2,@tmp2+4,@buffer+4
+	movzwl	tmp2,buffer
+;reset parser
+.if ndf,ALPHA
+	movl	AP,r0			;Get TPARSE block address
+.iff
+  	movl	4(AP),r0		;Get TPARSE block address
+.endc
+	movzwl	buffer,TPA$L_STRINGCNT(r0)	;and reset parser
+	movab	@buffer+4,TPA$L_STRINGPTR(r0)
+	movzbl	#SS$_NORMAL,r0
+	ret
+;	brw	op_rst				;reset parser
+
+; Translate a logical name & block out any 'funny' logicals
+;.entry	get_lnm,	^m<r2,r3,r4,r5>		;(lnmdsc_addr,target_idsc_addr)
+.call_entry,	2,home_args=TRUE,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=get_lnm
+	movq	4(AP),r2     			;get args 1&2
+	movq	(r2),-(SP)			;Copy a scratch input descr
+	movaq	(SP),r2				;and point at it for true src
+	clrl	r6				;Clr tranlations counter
+;;Restart translation process here!
+5$:	incl	r6				;Increment # translations
+	movzwl	-4(r3),(r3)			;restore target idsc
+	movw	(r3),lnmlst			;set buffersize in list
+	movab	@4(r3),lnmlst+4			;set target address
+	movaw	(r3),lnmlst+8			;set return length address
+	movab	@4(r2),r4			;address of source buffer
+	movzwl	(r2),r0				;len of source buffer
+	decl	r0				;backup to last char
+	beql	10$				;can't be simple ':'
+	cmpb	(r4)[r0],#^a/:/			;is last char a ':'?
+	bneq	10$				;no... use as is
+	clrq	-(SP)				;must make a bogus descrip
+	movaq	(SP),r2				;point at new descrip
+	movw	r0,(SP)				;set new length
+	movab	(r4),4(SP)			;new descrip -':'
+10$:	$trnlnm_s	-
+		attr	=	trnatt,-
+		tabnam	=	fildev,-
+		lognam	=	(r2),-
+		itmlst	=	lnmlst		;try to translate dflt device
+	blbs	r0,30$
+20$:	ret
+30$:	movzwl	#SS$_NOLOGNAM,r0
+	bbs	#LNM$V_TABLE,attrib,20$
+	bbs	#LNM$V_CONCEALED,attrib,20$
+	movzwl	#SS$_NORMAL,r0			;TERMINAL attrib is ok
+	bbs	#LNM$V_TERMINAL,attrib,20$	;all bogus types booted out
+	tstl	maxidx				;see if search list!
+	blss	20$				;error (maxidx negative)
+	bneq	50$				;go check searchlist
+;;Now go see if the result can be translated again... if so: retranslate it
+	$trnlnm_s	-
+		attr	=	trnatt,-
+		tabnam	=	fildev,-
+		lognam	=	(r3),-
+		itmlst	=	lnmls2		;try to translate result
+	blbc	r0,40$
+;;Had a translation: need to loop this puppie
+
+;;	movq	(r3),(r2)
+	pushr	#^m<r2,r3,r4,r5>
+	movc5	(r3),@4(r3),s^#0,#256,@l^tmp3+4
+	popr	#^m<r2,r3,r4,r5>
+	movaq	l^tmp3,r2
+	movw	(r3),(r2)
+
+	movl	#SS$_TOOMANYLNAM,r0
+	cmpl	#32,r6
+	blequ	45$
+	brw	5$
+40$:	movzbl	#SS$_NORMAL,r0
+45$:	ret
+50$:	;LNM is a searchlist - need to return LNM as 'translation'
+	pushr	#^m<r2,r3,r4,r5>
+	movc5	(r2),@4(r2),s^#0,#256,@l^tmp2+4
+	popr	#^m<r2,r3,r4,r5>
+	movw	(r2),l^tmp2
+	subw	r0,l^tmp2
+	movq	l^tmp2,r0
+	movzwl	r0,r0
+	movb	#^a/:/,(r1)[r0]			;go append a ':'
+	decl	r0
+	cmpb	#^a/:/,(r1)[r0]			;was it already ':'?
+	beql	40$				;And don't add extra colon
+	incw	l^tmp2				;add into strlen
+	brb	40$				;scram as if all was well
+
+; Directory retrieval stuff
+.entry	get_current_directory,	^m<r2,r3,r4,r5>	;(target_idsc_addr)
+	clrl	slist		;dir is not searchlisted
+	pushaq	tmp2		;target for logical translation
+	pushaw	sysdsk		;logical to grab
+	calls	#2,w^get_lnm	;get translation
+	blbs	r0,30$		;got something ok
+10$:	movaq	unavl,r1	;source for data copy
+20$:	pushl	r0		;save return code
+	movaq	@4(AP),r2
+	cmpl	r1,r2		;see if we really need to move the data
+	beql	25$
+	movq	r1,-(SP)	;save source & dest addrs
+	movc3	(r1),@4(r1),@4(r2)	;copy results to target
+	movq	(SP)+,r1	;restore source & dest addrs
+	movzwl	(r1),(r2)	;copy length too
+25$:	popl	r0		;recover return code
+	blbc	r0,27$
+	bbc	#0,slist,27$
+	bbss	#31,r0,27$	;set high order bit
+27$:	ret
+; tmp2 now filled with SYS$DISK translation
+30$:	;find out if tmp2 translates to a searchlist - if so, retain as-is
+	movq	l^tmp1,-(SP)	;save tmp1
+	movq	l^tmp2,-(SP)	;store tmp2
+	movq	l^tmp1,l^tmp2	;use tmp1 as translation space
+	pushaq	tmp2		;target fo logical translation
+	pushaq	4(SP)		;logical to grab (SYS$DISK former translation)
+	calls	#2,w^get_lnm	;get translation
+	movq	(SP)+,l^tmp2	;restore tmp2 to original SYS$DISK translation
+	movq	(SP)+,l^tmp1	;restore tmp1 to prior state
+	blbc	r0,40$
+	tstl	maxidx		;see if searchlist was result
+	bleq	40$		;something went kaboom (neg max idx)
+	incl	slist		;flag it as a searchlist
+	brw	60$
+
+40$:	movzwl	tmp1-4,tmp1	;restore descriptor
+	pushaq	tmp1
+	pushaw	tmp1
+	clrl	-(SP)
+	calls	#3,g^SYS$SETDDIR		;get dirtxt
+	blbs	r0,50$
+	brw	10$				;set noavail
+
+50$:	;append dirtxt to drive in tmp2
+	movq	tmp2,r0				;point to text
+	movzwl	r0,r0
+	movc3	tmp1,@tmp1+4,(r1)[r0]
+	addw3	tmp1,tmp2,r0
+	movzwl	r0,tmp2				;set total length
+60$:	movzbl	#SS$_NORMAL,r0
+	movaq	tmp2,r1				;point to text
+	brw	20$				;copy & ret ok
+
+
+chkhome:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>;,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bbs	#SW_V_CSH,switches,10$
+	bbs	#SW_V_HOME,switches,30$
+10$:	bbs	#SW_V_POP,switches,50$
+	bbs	#SW_V_HOME,switches,30$
+20$:	movzbl	#SS$_ABORT,r0
+	rsb
+30$:	movl	#9,buffer
+	moval	@buffer+4,r0
+	movl	#^a/SYS$/,(r0)+
+	movl	#^a/LOGI/,(r0)+
+	movl	#^a/N:  /,(r0)+
+40$:	movl	#ST_C_NEWDIR,retsts
+	movzbl	#SS$_CONTINUE,r0
+	rsb
+50$:	pushaq	buffer			;target idsc
+	pushaq	prvdr0			;previous directory name
+	calls	#2,w^get_lnm		;try to translate it
+	blbc	r0,20$
+	pushr	#^x3f
+	bisl	#1,w^dellst		;Set it in the dellist
+	popr	#^x3f
+	brw	40$
+
+; Parser setup & call only... LIB$TPARSE calls all action routines
+.entry	CD_PARSE,	^m<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	.PRVINIT
+	.READALL 0
+
+	clrl	vector			;mark 0 sts
+
+	cmpb	(AP),#3
+	beql	20$
+	movl	#LIB$_WRONUMARG,r0
+10$:	ret
+
+20$:	clrq	-(SP)
+	movaq	(SP),r3
+	clrl	-(SP)
+	pushaw	usrnam
+	pushab	@usrnam+4
+	pushl	#<JPI$_USERNAME@16>!12
+	moval	(SP),r2
+	$getjpiw_s	-
+		itmlst	=	(r2),-
+		iosb	=	(r3)
+	blbc	r0,10$
+	movzwl	(r3),r0
+	blbc	r0,10$
+	movab	8(r3),SP		;remove the jpijunk from the stack
+
+	movq	usrnam,r2
+	movzwl	r2,r2
+30$:	cmpb	#^a/ /,-1(r3)[r2]	;Is the last byte a space
+	bneq	40$
+	decl	r2
+	brb	30$
+40$:	movq	r2,usrnam
+
+	tstl	8(AP)
+	beql	50$
+	clrl	@8(AP)			;make bufblk pointer unavailable
+50$:
+	movaq	@4(AP),r6
+	movc3	(r6),@4(r6),@cmdbuf+4
+	movzwl	(r6),cmdbuf		;make local copy of data
+
+; Force buffer uppercase & remove all extraneous spaces
+	bsbw	fix_cmdbuf
+	blbs	r0,60$
+	ret
+
+; local init
+60$:
+	tstl	8(AP)
+	beql	70$
+	moval	bufblk,@8(AP)		;point user to return parameter block
+70$:
+	clrl	dellst			;No CD$n deletions yet
+	pushaq	prev			;target idsc
+	pushaq	prvdr0			;previous directory name
+	calls	#2,w^get_lnm		;try to translate it
+	movl	r0,prevf		;stuff the flags w/result code
+
+	pushaq	curd0			;try to get current directory
+	calls	#1,w^get_current_directory
+	movl	r0,curdf0		;stuff flags w/result code
+	blbs	r0,90$			;all is OK... keep trying
+80$:	movl	#ST_C_BADCURDIR,retsts	;set bad dir code
+	brw	do_stsid		;blast us outta the water
+90$:	bsbw	dir_reset		;make sure we can reset the dir ok
+	blbc	r0,80$			;blow up if we can't set to cur dir
+
+	clrl	switches		;switches cleared here & preserved later
+	clrl	lflags			;loop flags are cleared now
+
+; Now we begin a processing loop to separate the buffer by 'blank' delimiters
+; and sequentially re-call the parser to allow relative jumping for each
+; space-delimited element in the command line... note the possibility that
+; the switches can now appear at almost any location... we will test for the
+; result code that shows switches only (ST_C_NOOP) and we will abort command
+; processing if this does not occur in the correct place.  This method also
+; allows a pathological command sequence like CD # $ to occur... we will check
+; for illegal terminal characters also & abort processing if such occur.
+
+FL_V_ONE == 0		;At least once thru CD parse routines
+FL_M_ONE == <1@FL_V_ONE>
+FL_V_EOP == 1		;Next time *MUST* be End of OPeration
+FL_M_EOP == <1@FL_V_EOP>
+FL_V_VER == 2		;Verify set a directory... need to fix
+FL_M_VER == <1@FL_V_VER>
+FL_V_IEX == 3		;Immediate EXit requested
+FL_M_IEX == <1@FL_V_IEX>
+FL_V_SWS == 4		;SWitches Set ... if seen twice or not first, blow up
+FL_M_SWS == <1@FL_V_SWS>
+FL_V_SW1 == 5		;1-SWitcheSet operation... used w/NFT to allow switching
+FL_M_SW1 == <1@FL_V_SW1>
+FL_V_NFT == 6		;Not First Time ... used for SWS checking
+FL_M_NFT == <1@FL_V_NFT>
+FL_V_PART == 7		;We already tried a PARTIAL - do not do again
+FL_M_PART == <1@FL_V_PART>
+FL_V_PRSDEV == 8	;Personal device - if /PARTIAL, different processing
+FL_M_PRSDEV == <1@FL_V_PRSDEV>
+
+; !! Loop re-entry point !!
+100$:	bsbw	get_chunk		;get a chunk of CMDBUF to BUFFER
+	bicl	#FL_M_PART!FL_M_PRSDEV,w^lflags	;always clear these
+	bbcs	#FL_V_ONE,w^lflags,130$	;go thru at least once!
+	bbs	#FL_V_IEX,w^lflags,110$	;if immediate exit... then go do it!
+	tstl	r0			;is this EOS?
+	bneq	120$			;nope... go try another operation
+110$:	brw	do_stsid		;Go do stsid operation & leave
+
+120$:	bbc	#FL_V_EOP,w^lflags,130$	;Jmp if non-EOS is ok
+	movl	#ST_C_SYNTAX,retsts	;set syntax error
+	brw	do_stsid		;Go do stsid operation & leave
+
+130$:	clrl	nodnam
+	clrl	devnam			;no device seen yet!
+	clrl	retsts
+	clrl	retstv
+	clrl	curdf1
+	clrl	vector
+
+; TPA init
+	movc5	#0,#0,#0,#TPA$K_LENGTH0,argb0
+	moval	argb0,r2
+	movb	#1,TPA$B_MCOUNT(r2)
+	movl	#TPA$K_COUNT0,TPA$L_COUNT(r2)
+	movzwl	buffer,TPA$L_STRINGCNT(r2)
+	movab	@buffer+4,TPA$L_STRINGPTR(r2)
+	bisl	#<1@TPA$V_BLANKS>,TPA$L_OPTIONS(r2)
+
+;PRINTF <Active buffer contains '!AS'>,#buffer
+; call TPA
+	pushab	kytbl0
+	pushab	sttbl0
+	pushal	argb0
+.if ndf,ALPHA
+	calls	#3,G^LIB$TPARSE
+.iff
+	calls	#3,G^LIB$TABLE_PARSE
+.endc
+	blbs	r0,140$
+	ret					;simply return bombcode
+140$:	;dispatch on result codes & do local op for code
+	cmpl	retsts,#ST_C_BUG	;Op failure... not used here (BUG)
+	beql	160$
+	cmpl	retsts,#ST_C_NOOP	;empty cmdlin (CD) NOOP ... switches set
+	beql	170$
+	cmpl	retsts,#ST_C_SHOPRV	;pound sign (CD #) EOP/mb~NFT (SWS ok)
+	beql	150$
+	cmpl	retsts,#ST_C_SOFTEX	;Soft exit EOP/mb~NFT (SWS ok)
+	beql	150$
+	cmpl	retsts,#ST_C_HELP	;Help operation EOP/mb~NFT (SWS ok)
+150$:	beql	190$
+	cmpl	retsts,#ST_C_SYNTAX	;syntax... EOP
+	beql	200$
+	cmpl	retsts,#ST_C_NOCHANGE	;nochange (CD .)  NOOP / return if EOS
+	beql	210$
+	cmpl	retsts,#ST_C_NEWDIR	;new dir parsed (temp set new dir/ver)
+	beql	220$			;do a temporary set def
+	cmpl	retsts,#ST_C_DIRNEX	;Op failure... dirnex
+	beql	230$
+	cmpl	retsts,#ST_C_HARDEX	;Force hard exit
+	beql	230$
+160$:	movl	#ST_C_BUGCHECK,retsts
+	bisl	#FL_M_IEX!FL_M_VER,w^lflags	;blow off w/syntax
+	brw	100$
+170$:	brb	240$			;Stupid branch assist
+180$:	movl	#ST_C_SYNTAX,retsts
+	bisl	#FL_M_IEX!FL_M_VER,w^lflags ;blow off w/syntax
+	brb	210$			;go blow
+190$:	bbsc	#FL_V_SW1,w^lflags,200$	;allow 1-switch to be ok even for NFT
+	bbs	#FL_V_NFT,w^lflags,180$	;Whoops! Must be a first time operation
+200$:	bisl	#FL_M_EOP,w^lflags	;set required End of Operation
+210$:	bisl	#FL_M_NFT,w^lflags	;it is Not First Time thru anymore
+	brw	100$			;go back for more chunks
+
+220$:	tstw	buffer			;see if we said to go anywhere
+	bneq	250$
+	movl	#ST_C_DIRNEX,retsts
+	bisl	#FL_M_IEX!FL_M_VER,w^lflags	;mark 'immediate exit' flag
+	brb	210$			;get lost & dispatch retsts
+230$:	;leaves existing status code
+	bisl	#FL_M_IEX!FL_M_VER,w^lflags	;mark 'immediate exit' flag
+	brb	210$			;get lost & dispatch retsts
+
+240$:	bbss	#FL_V_SWS,w^lflags,180$	;not ok twice
+	bisl	#FL_M_SW1,w^lflags	;set 1-check for switches flag
+	bbs	#FL_V_NFT,w^lflags,180$	;NOT ok if NOT first time thru
+	brb	210$
+
+;	bsbw	chkhome			;tst /HOME switch & munch buffer/retsts
+;	cmpl	retsts,#ST_C_NOOP	;see if retsts got munched
+;	beql	210$
+;	brw	140$
+
+250$:	bsbw	setdir
+	blbs	r0,210$
+	bisl	#FL_M_IEX!FL_M_VER,w^lflags	;mark 'immediate exit' flag
+	brb	210$			;get lost & dispatch retsts
+
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+
+;;;;;Actual SETDDIR to 'buffer' routine
+setdir:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>;,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+
+	.save_psect	local_block
+	.psect	$local
+bfrdbgmsg:	.ascid ~!/Trace: \!AS\!/~
+tmpfaobuf:	.long ^x200
+	.address	.+4
+	.blkb	^x200
+	.restore_psect
+
+	;Perform intermediate tracing of formatted buffer if asked
+	bbc	#SW_V_TRC,switches,10$
+	movaq	buffer,r8		;setdef source address
+	movl	#^x200,l^tmpfaobuf
+	pushaq	(r8)
+	pushaq	tmpfaobuf
+	pushaw	tmpfaobuf
+	pushaq	bfrdbgmsg
+	calls	#4,@#SYS$FAO
+	pushaq	tmpfaobuf
+	calls	#1,g^LIB$PUT_OUTPUT
+
+10$:	movaq	buffer,r8		;setdef source address
+	movab	tmpfab,r9		;point to fab for operations
+	movc3	#FABSIZ,protofab,(r9)	;copy proto fab
+	movab	tmpnam,r10		;point to nam for operations
+	movc3	#NAMSIZ,protonam,(r10)	;copy proto nam
+
+	bisl	#FAB$M_NAM,FAB$L_FOP(r9)
+	movab	(r10),FAB$L_NAM(r9)
+
+.IF DF,ODS5
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_RSS(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_ESS(r10)
+;	movab	rssold,NAML$L_RSA(r10)
+;	movab	essold,NAML$L_ESA(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+
+	movab	@4(r8),NAML$L_LONG_FILENAME(r10)
+	movw	(r8),NAML$L_LONG_FILENAME_SIZE(r10)
+	mnegl	s^#1,FAB$L_FNA(r9)
+;;	movab	@4(r8),FAB$L_FNA(r9)
+;;	movb	(r8),FAB$B_FNS(r9)
+.IFF
+	movb	#NAM$C_MAXRSS,NAM$B_RSS(r10)
+	movb	#NAM$C_MAXRSS,NAM$B_ESS(r10)
+	movab	rssstr,NAM$L_RSA(r10)
+	movab	essstr,NAM$L_ESA(r10)
+
+	movab	@4(r8),FAB$L_FNA(r9)
+	movb	(r8),FAB$B_FNS(r9)
+.ENDC
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,60$
+20$:	bbc	#SW_V_PART,switches,40$
+	bbss	#FL_V_PART,w^lflags,40$	;block multiple partial guessing
+;does WILDCARD get set even if dir wasn't found??? -- YES!!
+	bbs	#NAM$V_WILDCARD,NAM$L_FNB(r10),40$	;not a wildcard
+	bsbw	build_partial
+	blbc	r0,40$			;go boom
+
+	tstw	buffer			;see if we said to go anywhere
+	bneq	30$ ;;190$ branch assist, Restart operation
+	movl	#ST_C_DIRNEX,retsts
+	movl	#SS$_ABORT,r0
+	rsb
+30$:	brw	10$			;;Another branch assist
+
+40$:	movl	#ST_C_DIRNEX,retsts
+	cmpl	r0,#RMS$_DNF
+	beql	50$
+.IF DF,OLD55BCODE
+	movl	#ST_C_HARDEX,retsts
+	movl	r0,retstv
+.IFF
+	movl	r0,retsts
+	movl	FAB$L_STV(r9),retstv
+.ENDC
+50$:	movl	#SS$_ABORT,r0
+	rsb
+
+60$:	movaq	dsc0,r6		;device descriptor address
+	movaq	dsc1,r7		;dirtxt descriptor address
+
+.IF DF,ODS5
+;;Original code, part 1
+	movzwl	NAML$L_LONG_DEV_SIZE(r10),(r6)
+;;;EndOriginal
+
+	movzwl	NAML$L_LONG_NODE_SIZE(r10),r1
+	beql	680$
+	addl3	NAML$L_LONG_NODE(r10),r1,r0
+	cmpl	r0,NAML$L_LONG_DEV(r10)
+	beql	610$
+	tstw	NAML$L_LONG_DEV_SIZE(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAML$L_LONG_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAML$L_LONG_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+	movzwl	NAML$L_LONG_DIR_SIZE(r10),(r7)
+	movl	NAML$L_LONG_DIR(r10),4(r7)
+.IFF
+;;Original code, part 1
+	movzbl	NAM$B_DEV(r10),(r6)
+;;;EndOriginal
+
+	movzbl	NAM$B_NODE(r10),r1
+	beql	680$
+	addl3	NAM$L_NODE(r10),r1,r0
+	cmpl	r0,NAM$L_DEV(r10)
+	beql	610$
+	tstb	NAM$B_DEV(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAM$L_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAM$L_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+	movzbl	NAM$B_DIR(r10),(r7)
+	movl	NAM$L_DIR(r10),4(r7)
+.ENDC
+;;  SIGVEC #CD_FAO_AS_AS,#2,r6,r7
+;;  SIGNAL
+	bsbw	smash_searchlist	;r10=NAM,r9=FAB,r6=<dev>,r7=<dir>
+	bsbw	normalize_r7		;remove any [000000...]
+	bbc	#NAM$V_WILDCARD,NAM$L_FNB(r10),80$	;not a wildcard
+	bsbw	sel_wild		;go select a wildcard dir
+	blbc	r0,70$			;Whoops! abort operation
+	brw	10$			;restart... may be more wildcards
+70$:	movl	r0,retsts		;blast us / r0=completion code
+	movl	#SS$_ABORT,r0
+	rsb
+
+80$:	bbc	#SW_V_VER,switches,90$	;are we simply verifying directory?
+;we're simply verifying the directory... need to go ahead & tempset the dir
+;for subsequent operations, but we also need to put it back when we're done!
+	bisl	#FL_M_VER,w^lflags	;set 'need reset' flag in lflags
+;Now we can set the new directory for subsequent segmental jumps
+90$:	;r6->dev, r7->dir
+	clrq	-(SP)
+	clrl	-(SP)
+	pushaq	(r6)		;text to insert to logical
+	pushaq	sysdsk
+	calls	#5,g^LIB$SET_LOGICAL
+;skip this if searchlisted logical was used as target
+	tstw	(r7)		;is there a DDIR to set?
+	beql	100$
+	clrq	-(SP)
+	pushaq	(r7)
+	calls	#3,g^SYS$SETDDIR
+.IF DF,ODS5
+	cmpl	r0,#RMS$_DIR	;see if we popped a dirname error
+	bneq	100$
+	cmpw	(r7),#255
+	bleq	100$		;and let it splat like old times (98.10.14)
+	bisw3	NAML$W_DID(r10),NAML$W_DID+2(r10),r0
+	bisw	NAML$W_DID+4(r10),r0
+	beql	100$		;and let it splat like old times (98.10.14)
+	movzbl	NAML$B_DID_RVN(r10),-(SP)
+	movzwl	NAML$W_DID_SEQ(r10),-(SP)
+	movzwl	NAML$W_DID_NUM(r10),-(SP)
+	movb	NAML$B_DID_NMX(r10),2(SP)
+	pushaq	(r7)
+	pushaw	(r7)
+	pushaq	didfmt
+	calls	#6,@#SYS$FAO
+	clrq	-(SP)
+	pushaq	(r7)
+	calls	#3,g^SYS$SETDDIR
+.ENDC
+
+;new dir is set... duplication doesn't matter here
+100$:	movl	#SS$_CONTINUE,r0
+110$:	rsb
+
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+;;;;;-----------------------------------------------------
+do_stsid:
+	bbc	#0,12(AP),20$			;simply return the code
+	bbc	#1,12(AP),10$			;do not set sig_to_ret trap
+	movaw	w^CD_SIG_TO_RET,(FP)		;set up trap
+10$:	bsbw	stsid				;do operation
+20$:	movl	retsts,r0
+	ret
+
+fix_cmdbuf:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>;,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+; First ... force entire string to upper case
+;; Ods-5 honors case... now we have to also
+;;	pushaq	cmdbuf
+;;	pushaq	cmdbuf
+;;	calls	#2,G^STR$UPCASE		;force to uppercase
+;;	rsbc
+
+; Next... Change all tabs to spaces
+	pushr	#^xffc			;save r2-11
+	movq	cmdbuf,r6		;r6'r7 is cmdbuf descrip
+	clrl	r5			;char index
+	movzwl	r6,r6			;remove any descriptor junk
+	bneq	20$
+10$:	popr	#^xffc			;recover r2-11
+	movzwl	#SS$_NORMAL,r0
+	rsb				;back to caller
+20$:	cmpb	(r7)[r5],#9		;is char a tab?
+	bneq	30$			;nope... leave it be
+	movb	#^a/ /,(r7)[r5]		;insert a space over the tab
+30$:	aoblss	r6,r5,20$		;do for all characters
+
+; Next... remove any trailing spaces
+40$:	cmpb	b^-1(r7)[r6],#^a/ /	;is last char a space?
+	bneq	50$			;nope... leave this section
+	decw	cmdbuf			;remove trailing char
+	sobgtr	r6,40$			;remove trailer & go more
+	brw	10$			;string got eaten
+
+; Now... remove any leading spaces
+50$:	movzwl	cmdbuf,r6		;get new copy of cmdbuf length
+60$:	cmpb	(r7),#^a/ /		;is first char a space?
+	bneq	70$			;nope... leave this section
+	incl	r7			;point one more char into string
+	incl	cmdbuf+4		;advance cmdbuf also
+	decw	cmdbuf			;take char from cmdbuf descrip
+	sobgtr	r6,60$			;remove leader char & go more
+65$:	brw	10$			;string got eaten
+
+; Now... remove any multi-spaces from string
+70$:	movzwl	cmdbuf,r6		;get new copy of cmdbuf length
+	decl	r6			;use EQ length (i.e. len==last char idx)
+	beql	65$			;no multi-space for 1 char string
+	clrl	r8			;new string index register
+80$:	cmpb	(r7)[r8],#^a/ /		;is *this* char a space?
+	bneq	86$			;nope... leave it be
+	cmpl	r8,r6			;cur index best be .LT. max index
+	bgequ	65$			;we're done!
+85$:	cmpb	1(r7)[r8],#^a/ /	;is *next* char a space?
+	beql	87$			;yep... go munch it
+86$:	aobleq	r6,r8,80$
+	brw	65$			;done
+; Now we must subtract *NEXT* character from string
+; r8 = index of *THIS* char, r6 = max char index
+87$:	subl3	r8,r6,r0		;number of chars to move + 1
+	decl	r0			;remove '+1' character count
+	beql	90$
+	movc3	r0,2(r7)[r8],1(r7)[r8]	;backmove the string by 1 char
+90$:	decw	cmdbuf			;remove char from cmdbuf length
+	decl	r6			;remove char from counter
+	bneq	80$			;string still OK... restart 'next' test
+	brw	65$			;string got eaten... go away
+
+get_chunk:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	pushr	#^xffc			;save all regs but r0'r1
+	movq	cmdbuf,r2		;r2'r3 = CMDBUF descriptor
+	movq	buffer,r4		;r4'r5 = BUFFER descriptor (len wrong)
+	movzwl	r2,r2			;remove any descrip crap
+	clrl	r6			;no characters copied to buffer yet
+	tstl	r2			;are there any characters left?
+	beql	40$			;bug off - no more characters left
+	cmpb	(r3),#^a/@/		;is starting char an '@'?
+	beql	at_chunk		;at_chunk uses different rules
+	cmpb	(r3),#^a/~/		;is starting char an '~'?
+	beql	at_chunk		;at_chunk uses different rules
+10$:	cmpb	(r3),#^a/ /		;is current source byte a space?
+	beql	30$			;go remove it & return buffer
+	bbc	#FL_V_SWS,w^lflags,20$	;If we're not past switches, then jmp
+	cmpb	(r3),#^a'/'		;is current source byte a /?
+	bneq	20$			;passit
+	movb	#^a/\/,(r3)		;Change / to \ so parse will work
+20$:	movb	(r3)+,(r5)+		;copy the byte to BUFFER
+	incl	r6			;register another char copied
+	sobgtr	r2,10$			;back for full string
+	clrw	cmdbuf			;zero cmdbuf now that we're EOS
+	brb	40$			;and leave
+30$:	decl	r2			;remove current space
+	movb	r2,cmdbuf		;update cmdbuf size
+	addl3	#1,r3,cmdbuf+4		;update cmdbuf address
+40$:	movl	r6,r0			;return # of chars copied
+	movw	r6,buffer		;and insert to buffer
+	popr	#^xffc
+	rsb				;return
+
+at_chunk: ;Bite off a chunk, but end for '.', '/', or '\' delims too
+10$:
+.IF DF,DISABLE_THIS
+;;the at_chunk routine processes USERNAMES....these should NOT contain
+;;  caret-escaped '.' characters!
+.IF DF,ODS5
+	cmpb	(r3),#^a/^/		;is current source byte a '^'?
+	bneq	15$			;no... proceed w/no ODS5 escape
+	movb	(r3)+,(r5)+		;copy the escape byte to BUFFER
+	incl	r6			;register another char copied
+	sobgtr	r2,20$			;forward to copy ANOTHER to buffer
+	brb	25$
+15$:
+.ENDC
+.ENDC
+	cmpb	(r3),#^a/ /		;is current source byte a space?
+	beql	30$			;go remove it & return buffer
+	cmpb	(r3),#^a/./		;is current source byte a '.'?
+	beql	35$			;**KEEP** it & return buffer
+	cmpb	(r3),#^a/\/		;is current source byte a '\'?
+	beql	27$			;overpunch with '.' & keepit
+	cmpb	(r3),#^a'/'		;is current source byte a '/'?
+	beql	27$			;overpunch with '.' & keepit
+	bbc	#FL_V_SWS,w^lflags,20$	;If we're not past switches, then jmp
+	cmpb	(r3),#^a'/'		;is current source byte a /?
+	bneq	20$			;passit
+	movb	#^a/\/,(r3)		;Change / to \ so parse will work
+20$:	movb	(r3)+,(r5)+		;copy the byte to BUFFER
+	incl	r6			;register another char copied
+	sobgtr	r2,10$			;back for full string
+25$:	clrw	cmdbuf			;zero cmdbuf now that we're EOS
+	brb	40$			;and leave
+27$:	movb	#^a/./,(r3)		;Overpunch \/ with '.' to noRoot subdir
+	brb	35$
+30$:	decl	r2			;remove current space
+35$:	movb	r2,cmdbuf		;update cmdbuf size
+	addl3	#1,r3,cmdbuf+4		;update cmdbuf address
+40$:	movl	r6,r0			;return # of chars copied
+	movw	r6,buffer		;and insert to buffer
+	popr	#^xffc
+	rsb				;return
+
+;.entry	CD_SIG_TO_RET,^m<r4,r5>
+.call_entry,	6,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=CD_SIG_TO_RET
+	movl	CHF$L_SIGARGLST(AP),r4
+	cmpl	CHF$L_SIG_NAME(r4),#SS$_UNWIND
+	beql	30$
+	movl	CHF$L_MCHARGLST(AP),r5
+	movl	CHF$L_SIG_NAME(r4),r1
+.if df,BOGUS
+	extzv	#STS$V_FAC_NO,#STS$S_FAC_NO,r1,r0
+	cmpl	r0,#CD$_FACILITY
+	bneq	20$
+.endc
+.if ndf,ALPHA
+	movl	r1,CHF$L_MCH_SAVR0(r5)	; copy signal name as condition code
+.iff
+	clrl	CHF$IL_MCH_SAVR0_HIGH(r5)
+	movl	r1,CHF$IL_MCH_SAVR0_LOW(r5)
+.endc
+	moval	vector,r5		;target to copy vector to
+	movl	(r4),r1			;get count of lwords to copy
+10$:	movl	(r4)+,(r5)+		;copy an argument
+	sobgeq	r1,10$			;copy signal array
+	$unwind_s			;blow away establisher frame
+20$:	movl	#SS$_RESIGNAL,r0
+30$:	ret
+
+stsid:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bbc	#FL_V_VER,w^lflags,5$	;skip dir reset opertion
+	bsbw	dir_reset		;always do dir_reset first
+5$:	;dispatch on result codes
+	cmpl	retsts,#ST_C_SYNTAX
+	beql	10$
+	cmpl	retsts,#ST_C_NOCHANGE
+	beql	20$
+	cmpl	retsts,#ST_C_NOOP
+	beql	30$
+	cmpl	retsts,#ST_C_SHOPRV
+	beql	40$
+	cmpl	retsts,#ST_C_NEWDIR
+	beql	50$
+	cmpl	retsts,#ST_C_DIRNEX
+	beql	60$
+	cmpl	retsts,#ST_C_HELP
+	beql	70$
+	cmpl	retsts,#ST_C_BADCURDIR
+	beql	80$
+	cmpl	retsts,#ST_C_BUGCHECK
+	beql	90$
+	brw	1000$
+10$:	brw	do_syntax
+20$:	brw	do_nochange
+30$:	brw	do_current
+40$:	brw	do_prev
+50$:	brw	do_target
+60$:	brw	do_fail
+70$:	brw	do_help
+80$:	brw	do_baddir
+90$:	brw	do_bugcheck
+1000$:	cmpl	retsts,#ST_C_HARDEX
+	beql	1010$
+	cmpl	retsts,#ST_C_SOFTEX
+	beql	1020$
+	brw	do_unknown
+1010$:	brw	do_hardex
+1020$:	brw	do_softex
+
+; result execution routines
+do_syntax:
+	bbs	#SW_V_FUL,switches,10$
+	SIGVEC	#CD_SYNTAX,#0
+	brw	do_isdone
+10$:	SIGVEC	#CD_SYNTAX,#0,#CD_SYNTXT,#1,#buffer
+	brw	do_isdone
+do_current:
+	bsbw	chkhome			;tst /HOME switch & munch buffer/retsts
+	blbc	r0,10$			;'error' means /HOME didn't work
+	bsbw	setdir			;Try to set modified target directory
+	brw	do_target		;Alter flow for changed dir
+10$:	bbs	#SW_V_FUL,switches,20$
+	SIGVEC	#CD_CURDIR,#1,#curd0
+	brw	do_isdone
+20$:	SIGVEC	#CD_CURIS,#1,#curd0
+	brw	do_isdone
+do_nochange:
+	bbs	#SW_V_FUL,switches,10$
+	SIGVEC	#CD_NOCHNG,#0
+	brw	do_isdone
+10$:	SIGVEC	#CD_NOCHNG,#0,#CD_CURIS,#1,#curd0
+	brw	do_isdone
+do_dirisok:
+	bbs	#SW_V_FUL,switches,10$
+	SIGVEC	#CD_DIREX,#0
+	brw	do_isdone
+10$:	SIGVEC	#CD_DIREX,#0,#CD_TRGWAS,#2,#dsc0,#dsc1
+	brw	do_isdone
+do_prev:
+	blbs	prevf,10$
+	movc3	notdef,@notdef+4,@buffer+4
+	movzwl	notdef,buffer
+	brw	do_fail
+10$:	bbs	#SW_V_FUL,switches,20$
+	SIGVEC	#CD_PRVDIR,#1,#prev
+	brw	do_isdone
+20$:	SIGVEC	#CD_PRVIS,#1,#prev
+	brw	do_isdone
+do_fail:
+	bbs	#SW_V_FUL,switches,10$
+	SIGVEC	#CD_DIRNEX,#0
+	brw	do_isdone
+10$:	tstw	buffer
+	beql	20$
+	SIGVEC	#CD_DIRNEX,#0,#CD_TRGWAS,#2,#buffer,#nulstr
+	brw	do_isdone
+20$:	SIGVEC	#CD_DIRNEX,#0,#CD_PRVNDF
+;	brw	do_isdone
+do_isdone:
+	SIGNAL	savsts=retsts
+	movzbl	#SS$_NORMAL,r0
+	rsb
+
+do_hardex:
+	SIGVSTA
+	SIGVCOD	retstv
+	SIGVEND
+;	cmpzv	#STS$V_FAC_NO,#STS$S_FAC_NO,retstv,#RMS$_FACILITY
+;	beql	10$
+;	SIGVEC	retstv,#0
+;	brw	do_isdone
+;10$:	SIGVEC	retstv,#MSGVAL_NOOP
+	brw	do_isdone
+
+do_softex:
+	movl	#CD_OUTPUTDONE,r0
+	movl	r0,retsts
+	rsb
+
+do_unknown:
+;;;	SIGVEC	#CD_UNEXPERR,#1,retsts,retsts,#MSGVAL_NOOP
+	cmpl	retsts,#RMS$_DIR
+	bneq	20$
+10$:	SIGVEC	retsts,#^x10000001
+	brw	30$
+20$:	cmpl	retsts,#RMS$_SYN
+	beql	10$
+	SIGVSTA
+	SIGVCOD	retsts
+	SIGVEND	#CD_UNEXPERR!STS$M_INHIB_MSG,#1,retsts
+30$:	SIGNAL	savsts=retsts
+	movl	retsts,r0
+	rsb
+
+smash_searchlist:	;r10=NAM,r9=FAB,r6=<dev>,r7=<dir>
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bbs	#NAM$V_SEARCH_LIST,NAM$L_FNB(r10),10$	;restore original data
+	rsb
+10$:
+
+.IF DF,ODS5
+	movzwl	NAML$L_LONG_FILENAME_SIZE(r10),r0
+	movab	@NAML$L_LONG_FILENAME(r10),r1
+	mnegl	s^#1,FAB$L_FNA(r9)
+;;	movzbl	FAB$B_FNS(r9),r0
+;;	movab	@FAB$L_FNA(r9),r1
+.IFF
+	movzbl	FAB$B_FNS(r9),r0
+	movab	@FAB$L_FNA(r9),r1
+.ENDC
+.IF NE,1
+;;This section of code executes only if calling dir has a [ or <
+;;in it... this is known to cause the DEF TST SYS$MANAGER, CD TST
+;;bug pre-V5.4. Unfortunately, removing it clobbers the ability to
+;;retain _any_ searchlist...
+	locc	#^a/[/,r0,(r1)		;see if there was a directory
+	bneq	20$
+	locc	#^a/</,r0,(r1)		;see if there was a directory
+	bneq	20$			;go do reparse
+;Use original data with no translation
+.IF DF,ODS5
+	movzwl	NAML$L_LONG_FILENAME_SIZE(r10),(r6)
+	movab	@NAML$L_LONG_FILENAME(r10),4(r6)
+	mnegl	s^#1,FAB$L_FNA(r9)
+;;	movzbw	FAB$B_FNS(r9),(r6)
+;;	movab	@FAB$L_FNA(r9),4(r6)
+.IFF
+	movzbw	FAB$B_FNS(r9),(r6)
+	movab	@FAB$L_FNA(r9),4(r6)
+.ENDC
+	clrw	(r7)
+	rsb
+.ENDC
+20$:	bisb	#NAM$M_SYNCHK,NAM$B_NOP(r10)	;force syntax only!!
+; Now we do a parse /syntax_only to get the spec'd directory
+.IF DF,ODS5
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_RSS(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_ESS(r10)
+;	movab	rssold,NAML$L_RSA(r10)
+;	movab	essold,NAML$L_ESA(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+.IFF
+	movb	#NAM$C_MAXRSS,NAM$B_RSS(r10)
+	movb	#NAM$C_MAXRSS,NAM$B_ESS(r10)
+	movab	rssstr,NAM$L_RSA(r10)
+	movab	essstr,NAM$L_ESA(r10)
+.ENDC
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)				;reparse!
+	.READALL 0
+	blbs	r0,40$
+	movl	r0,retsts
+	SIGVEC	#CD_UNEXPERR,#1,retsts,#CD_UNKTXT,#1,#buffer,FAB$L_STS(r9),FAB$L_STV(r9)
+	SIGNAL	savsts=retsts
+	movl	retsts,r0
+	rsb
+40$:
+
+.IF DF,ODS5
+;;Original code, part 1
+	movzwl	NAML$L_LONG_DEV_SIZE(r10),(r6)
+;;;EndOriginal
+
+	movzwl	NAML$L_LONG_NODE_SIZE(r10),r1
+	beql	680$
+	addl3	NAML$L_LONG_NODE(r10),r1,r0
+	cmpl	r0,NAML$L_LONG_DEV(r10)
+	beql	610$
+	tstw	NAML$L_LONG_DEV_SIZE(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAML$L_LONG_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAML$L_LONG_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+	movzwl	NAML$L_LONG_DIR_SIZE(r10),(r7)
+	movl	NAML$L_LONG_DIR(r10),4(r7)
+.IFF
+;;Original code, part 1
+	movzbl	NAM$B_DEV(r10),(r6)
+;;;EndOriginal
+
+	movzbl	NAM$B_NODE(r10),r1
+	beql	680$
+	addl3	NAM$L_NODE(r10),r1,r0
+	cmpl	r0,NAM$L_DEV(r10)
+	beql	610$
+	tstb	NAM$B_DEV(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAM$L_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAM$L_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+	movzbl	NAM$B_DIR(r10),(r7)
+	movl	NAM$L_DIR(r10),4(r7)
+.ENDC
+	rsb
+
+normalize_r7:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	movq	r6,-(SP)
+	movq	r8,-(SP)
+	movl	r7,r8
+	movq	(r8),r6
+	movzwl	r6,r6
+10$:	cmpl	#8,r6
+	blssu	30$
+20$:	movq	(SP)+,r8
+	movq	(SP)+,r6
+	rsb			;return... no longer big enough for '[000000.'
+30$:	cmpl	(r7),#^a/[000/
+	bneq	20$
+	cmpl	4(r7),#^a/000./
+	bneq	20$
+	subw	#7,(r8)
+	movc3	(r8),8(r7),1(r7)	;slam remaining string over '[000000.'
+	brb	20$
+
+do_target:
+	pushaq	buffer			;try to get current directory
+	calls	#1,w^get_current_directory
+	blbs	r0,10$
+	brw	do_fail
+
+10$:	movaq	buffer,r8		;setdef source address
+	movab	tmpfab,r9		;point to fab for operations
+	movc3	#FABSIZ,protofab,(r9)	;copy proto fab
+	movab	tmpnam,r10		;point to nam for operations
+	movc3	#NAMSIZ,protonam,(r10)	;copy proto nam
+
+	bisl	#FAB$M_NAM,FAB$L_FOP(r9)
+	movab	(r10),FAB$L_NAM(r9)
+
+.IF DF,ODS5
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_RSS(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_ESS(r10)
+;	movab	rssold,NAML$L_RSA(r10)
+;	movab	essold,NAML$L_ESA(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+
+	movab	@4(r8),NAML$L_LONG_FILENAME(r10)
+	movw	(r8),NAML$L_LONG_FILENAME_SIZE(r10)
+	mnegl	s^#1,FAB$L_FNA(r9)
+;;	movab	@4(r8),FAB$L_FNA(r9)
+;;	movb	(r8),FAB$B_FNS(r9)
+.IFF
+	movb	#NAM$C_MAXRSS,NAM$B_RSS(r10)
+	movb	#NAM$C_MAXRSS,NAM$B_ESS(r10)
+	movab	rssstr,NAM$L_RSA(r10)
+	movab	essstr,NAM$L_ESA(r10)
+
+	movab	@4(r8),FAB$L_FNA(r9)
+	movb	(r8),FAB$B_FNS(r9)
+.ENDC
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,20$
+	movl	r0,retstv
+	cmpl	r0,#RMS$_DNF
+	beql	15$
+	brw	do_hardex
+15$:	brw	do_fail
+20$:	bbs	#NAM$V_WILDCARD,NAM$L_FNB(r10),15$ ;wildcards illegal
+	movaq	dsc0,r6		;device descriptor address
+	movaq	dsc1,r7		;dirtxt descriptor address
+
+
+.IF DF,ODS5
+;;Original code, part 1
+	movzwl	NAML$L_LONG_DEV_SIZE(r10),(r6)
+;;;EndOriginal
+
+	movzwl	NAML$L_LONG_NODE_SIZE(r10),r1
+	beql	680$
+	addl3	NAML$L_LONG_NODE(r10),r1,r0
+	cmpl	r0,NAML$L_LONG_DEV(r10)
+	beql	610$
+	tstw	NAML$L_LONG_DEV_SIZE(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAML$L_LONG_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAML$L_LONG_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+	movzbl	NAML$L_LONG_DIR_SIZE(r10),(r7)
+	movl	NAML$L_LONG_DIR(r10),4(r7)
+.IFF
+;;Original code, part 1
+	movzbl	NAM$B_DEV(r10),(r6)
+;;;EndOriginal
+
+	movzbl	NAM$B_NODE(r10),r1
+	beql	680$
+	addl3	NAM$L_NODE(r10),r1,r0
+	cmpl	r0,NAM$L_DEV(r10)
+	beql	610$
+	tstb	NAM$B_DEV(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAM$L_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAM$L_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+	movzbl	NAM$B_DIR(r10),(r7)
+	movl	NAM$L_DIR(r10),4(r7)
+.ENDC
+	bsbw	smash_searchlist	;r10=NAM,r9=FAB,r6=<dev>,r7=<dir>
+	bsbw	normalize_r7		;remove any [000000...]
+
+	bbc	#SW_V_VER,switches,30$
+	brw	do_dirisok
+
+30$:	;r6->dev, r7->dir
+	clrq	-(SP)
+	clrl	-(SP)
+	pushaq	(r6)		;text to insert to logical
+	pushaq	sysdsk
+;skip this if searchlisted logical was used as target
+	tstw	(r7)		;is there a DDIR to set?
+	beql	35$
+	calls	#5,g^LIB$SET_LOGICAL
+	clrq	-(SP)
+	pushaq	(r7)
+	calls	#3,g^SYS$SETDDIR
+
+;new dir is set... test for duplication
+35$:	pushaq	curd1
+	calls	#1,w^get_current_directory
+	movl	r0,curdf1
+	blbsw	r0,40$
+
+;;	SIGVSTA
+;;	SIGVCOD	retstv
+;;	SIGVEND
+
+;;;	SIGVEC	#CD_DIRERR,#1,curdf1,#MSGVAL_NOOP
+
+	SIGVSTA
+	SIGVCOD	curdf1
+	SIGVEND	#CD_DIRERR,#1,curdf1
+
+	SIGNAL	savsts=retsts
+	$exit_s	-
+		code	=	curdf1
+40$:
+	cmpw	curd0,curd1
+	bneq	50$
+	cmpc3	curd0,@curd0+4,@curd1+4
+	bneq	50$
+	brw	do_nochange
+50$:	;directory has changed ok... set prev logical
+	clrq	-(SP)
+	clrl	-(SP)
+
+.IF DF,ODS5
+	movl	curd2-4,curd2
+.IF DF,OLDWAY
+	pushaw	curd2		;Resultant size
+	pushal	constFF		;Addr of 255
+	pushaq	curd2		;Resultant string (maybe squished)
+	pushaq	curd0		;Source string
+	calls	#4,g^LIB$TRIM_FILESPEC
+.IFF
+	pushaw	curd2		;Resultant size
+	pushaq	curd2		;Resultant string (maybe squished)
+	pushaq	curd0		;Source string
+	calls	#3,g^SHORT_DIRSPEC
+.ENDC
+	blbs	r0,55$
+	movl	r0,retsts
+	movl	r0,retstv
+
+;;;	SIGVEC	#CD_FSPERROR,#1,retsts,retsts,#MSGVAL_NOOP
+	SIGVSTA
+	SIGVCOD	retsts
+	SIGVEND	#CD_FSPERROR,#1,retsts
+	SIGNAL	savsts=retsts
+	$exit_s	-
+		code	=	retstv
+
+55$:	pushaq	curd2		;text to insert to logical
+	pushaq	prvdir		;prev logical
+	calls	#5,g^LIB$SET_LOGICAL	;Poof! saved it!
+
+	pushaq	curd2		;insert this logical text
+	calls	#1,stack_dirs	;to the stack of previous directories
+
+.IFF
+	pushaq	curd0		;text to insert to logical
+	pushaq	prvdir		;prev logical
+	calls	#5,g^LIB$SET_LOGICAL	;Poof! saved it!
+
+	pushaq	curd0		;insert this logical text
+	calls	#1,stack_dirs	;to the stack of previous directories
+.ENDC
+
+	bbc	#SW_V_LOG,switches,60$
+	SIGVEC	#CD_DIRSET,#0,#CD_PRVIS,#1,#curd0,#CD_CURIS,#1,#curd1
+	brb	70$
+60$:	SIGVEC	#CD_DIRSET,#0
+70$:	SIGNAL	savsts=retsts
+	movzbl	#SS$_NORMAL,r0
+	rsb
+
+do_help:
+	bbs	#SW_V_VERSID,switches,30$
+	bbc	#2,12(AP),10$			;Help is not inhibited
+	SIGVEC	#CD_NOHELP,#0
+	brb	20$
+10$:	SIGVEC	#CD_HELPDONE,#0
+20$:	SIGNAL	savsts=retsts
+	movzbl	#SS$_NORMAL,r0
+	rsb
+30$:	SIGVEC	#CD_VERSION,#0
+	SIGNAL	savsts=retsts
+	movl	#CD_OUTPUTDONE,r0
+	movl	r0,retsts
+	rsb
+
+do_baddir:
+	SIGVEC	#CD_CURDIRBAD,#0
+	brw	do_isdone
+do_bugcheck:
+	SIGVEC	#CD_BUGCHECK,#0
+	brw	do_isdone
+
+;This carves up buffer (if possible) to try a wildcard guess at a directory
+build_partial:	;chew up BUFFER & try again
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bbs	#FL_V_PRSDEV,w^lflags,rebuild_prsdev
+
+rebuild_buffer:
+	pushr	#^xffc
+	movaq	buffer,r9
+	bsbw	rebuild_generic
+	popr	#^xffc
+	rsb
+
+rebuild_prsdev:	;attempt to insert '*** series into last parm & reformat
+	pushr	#^xffc
+	subl3	s^#1,segcnt,r0	
+	movaq	segarr,r1
+	movaq	(r1)[r0],r8		;point at 'last' parm
+	movc3	(r8),@4(r8),@devnam+4	;copy segment
+	movb	#^a/]/,(r3)+		;tack on a trailing ']'
+	addw3	s^#1,(r8),devnam	;copy length + ']'
+	movaq	devnam,r9		;mess up devnam now - not buffer
+	bsbw	rebuild_generic
+	popr	#^xffc
+
+10$:	pushr	#^xffc			;keep preserving callers registers
+	subl3	s^#1,segcnt,r0	
+	movaq	segarr,r1
+	movaq	(r1)[r0],r8		;point at 'last' parm
+	decl	devnam
+	movq	devnam,(r8)		;overwrite segarr
+	bsbw	fmtprsdev		;go try to reformat prsdev
+	popr	#^xffc
+	rsb
+
+rebuild_generic:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	movq	(r9),r0
+	movzwl	r0,r0
+	movab	b^-1(r1)[r0],r2
+	movl	r2,r8			;save a copy of r2 someplace safe
+	decl	r2			;remove trailing ']' (if there)
+	cmpb	(r8),#^a/]/		;gottabe a closing ']'
+	beql	30$
+10$:	movzwl	#SS$_ABORT,r0
+20$:;	popr	#^xffc
+	rsb
+30$:	cmpl	r2,4(r9)		;are we outta buffer yet?
+	beql	55$
+.IF DF,ODS5
+	movl	4(r9),r0
+33$:	cmpb	(r0),#^a/^/
+	beql	35$
+	aoblss	r2,r0,33$
+	brb	39$
+35$:	aoblss	r2,r0,39$		;;Chease alert! '^' doesn't trigger code
+     ;;Current char IS escaped
+	decl	r2
+	decl	r2
+	brb	30$
+
+39$: ;;Current char is NOT escaped (or is a '^' itself....)
+.ENDC
+	cmpb	(r2),#^a/./		;isita '.'?
+	beql	60$
+	cmpb	(r2),#^a/:/		;isita ':'?
+	beql	60$
+	cmpb	(r2),#^a/[/		;isita '['?
+	beql	60$		;;Added CD V6.0 - looked broken w/o this inst
+	decl	r2
+40$:	brb	30$
+50$:	brw	10$			;branch assist
+55$:	decl	r2			;non-char - add fake-char
+60$:	;(r2) now points at 'character' that halted the substitution search
+	addl3	s^#1,r2,r7		;char 1 of substitutable string or EOS
+	cmpl	r7,r8			;was subst string empty?
+	beql	50$			;scram - end substitution
+70$:	cmpl	r7,r8			;is subst string finished?
+	beql	80$			;scram - end substitution
+	incl	r7			;r7 now points at first/next '*' insert
+	bsbb	90$			;go insert a star
+	brb	70$
+80$:	movzwl	#SS$_NORMAL,r0
+	brw	20$			;get lost
+90$:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	subl3	r7,r8,r0		;number of chars to move
+	incl	r0			;need to move 1 more char (']')
+	movc5	r0,(r7),(r7),r0,b^1(r7)	;insert space
+	movb	#^a/*/,(r7)+		;insert star, skip forward
+	incl	r8			;because we added a char
+	incw	(r9)			;gotta add into buffer too
+	rsb
+
+;This resets directory from CURD0 for testing & if it was changed by /VER
+dir_reset:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	blbs	curdf0,10$		;ok so far
+4$:	$exit_s	-			;blow up hard
+		code = #CD_CURDIRBAD
+10$:	movaq	curd0,r8		;setdef source address
+	movab	tmpfab,r9		;point to fab for operations
+	movc3	#FABSIZ,protofab,(r9)	;copy proto fab
+	movab	tmpnam,r10		;point to nam for operations
+	movc3	#NAMSIZ,protonam,(r10)	;copy proto nam
+
+	bisl	#FAB$M_NAM,FAB$L_FOP(r9)
+	movab	(r10),FAB$L_NAM(r9)
+
+	bisb	#NAM$M_SYNCHK,NAM$B_NOP(r10)	;syntax only!!
+.IF DF,ODS5
+	bisb	#NAML$M_NO_SHORT_UPCASE,NAML$B_NOP(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_RSS(r10)
+;	movb	#NAM$C_MAXRSS,NAML$B_ESS(r10)
+;	movab	rssold,NAML$L_RSA(r10)
+;	movab	essold,NAML$L_ESA(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_EXPAND_ALLOC(r10)
+	movl	#NAML$C_MAXRSS,NAML$L_LONG_RESULT_ALLOC(r10)
+	movab	rssstr,NAML$L_LONG_RESULT(r10)
+	movab	essstr,NAML$L_LONG_EXPAND(r10)
+
+	movab	@4(r8),NAML$L_LONG_FILENAME(r10)
+	movw	(r8),NAML$L_LONG_FILENAME_SIZE(r10)
+	mnegl	s^#1,FAB$L_FNA(r9)
+;;	movab	@4(r8),FAB$L_FNA(r9)
+;;	movb	(r8),FAB$B_FNS(r9)
+.IFF
+	movb	#NAM$C_MAXRSS,NAM$B_RSS(r10)
+	movb	#NAM$C_MAXRSS,NAM$B_ESS(r10)
+	movab	rssstr,NAM$L_RSA(r10)
+	movab	essstr,NAM$L_ESA(r10)
+
+	movab	@4(r8),FAB$L_FNA(r9)
+	movb	(r8),FAB$B_FNS(r9)
+.ENDC
+	.READALL 1			;Flip on readall if possible
+	$parse	fab=(r9)		;parse the sucker!
+	.READALL 0
+	blbs	r0,20$
+	brw	4$			;blow hard
+
+20$:	movaq	dsc0,r6		;device descriptor address
+	movaq	dsc1,r7		;dirtxt descriptor address
+
+.IF DF,ODS5
+;;Original code, part 1
+	movzwl	NAML$L_LONG_DEV_SIZE(r10),(r6)
+;;;EndOriginal
+
+	movzwl	NAML$L_LONG_NODE_SIZE(r10),r1
+	beql	680$
+	addl3	NAML$L_LONG_NODE(r10),r1,r0
+	cmpl	r0,NAML$L_LONG_DEV(r10)
+	beql	610$
+	tstw	NAML$L_LONG_DEV_SIZE(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAML$L_LONG_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAML$L_LONG_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+
+	movzwl	NAML$L_LONG_DIR_SIZE(r10),(r7)
+	movl	NAML$L_LONG_DIR(r10),4(r7)
+.IFF
+
+;;Original code, part 1
+	movzbl	NAM$B_DEV(r10),(r6)
+;;;EndOriginal
+
+	movzbl	NAM$B_NODE(r10),r1
+	beql	680$
+	addl3	NAM$L_NODE(r10),r1,r0
+	cmpl	r0,NAM$L_DEV(r10)
+	beql	610$
+	tstb	NAM$B_DEV(r10)
+	beql	610$
+  clrl @#0	;Out the back door... something's screwed
+610$:
+	addl	r1,(r6)		;Add nodelength into dev
+	movl	NAM$L_NODE(r10),4(r6)
+	brb	690$
+680$:
+;;Original code, part 2
+	movl	NAM$L_DEV(r10),4(r6)
+;;;EndOriginal
+690$:
+
+	movzbl	NAM$B_DIR(r10),(r7)
+	movl	NAM$L_DIR(r10),4(r7)
+.ENDC
+	bsbw	smash_searchlist	;r10=NAM,r9=FAB,r6=<dev>,r7=<dir>
+	bsbw	normalize_r7		;remove any [000000...]
+
+	;r6->dev, r7->dir
+	clrq	-(SP)
+	clrl	-(SP)
+	pushaq	(r6)		;text to insert to logical
+	pushaq	sysdsk
+	calls	#5,g^LIB$SET_LOGICAL
+;skip this if searchlisted logical was used as target
+	tstw	(r7)		;is there a DDIR to set?
+	beql	30$
+	clrq	-(SP)
+	pushaq	(r7)
+	calls	#3,g^SYS$SETDDIR
+30$:	rsb
+
+.entry	stack_dirs,	^xffc			;Stack name into logical stack
+	bbc	#SW_V_CSH,switches,10$		;No push/pop check
+	bbs	#SW_V_PUSH,switches,10$		;Are we pushing a dir?
+	bbs	#SW_V_POP,switches,30$		;Are we pushing a dir?
+	bbss	#0,r0,20$			;Just successfully xit
+10$:	pushaq	@4(AP)				;this is the LNM to insert
+	pushaq	@4(AP)				;this is previous XLT also
+	clrl	-(SP)				;start @ 0
+	calls	#3,w^mov_stack			;do insert operation
+20$:	ret
+30$:	calls	#0,w^deldirs			;Go delete all listed dirs
+	blbc	r0,20$
+	calls	#0,w^packdirs			;Pack deleteds
+	brb	20$
+
+.entry	deldirs,	^xffc
+	subl	#40,SP				;space4 source text+descr (32+8)
+	moval	8(SP),4(SP)
+	movaq	(SP),r6				;source descriptor
+	clrl	r2				;dirnum counter
+10$:	bbs	r2,dellst,30$
+20$:	aoblss	#10,r2,10$			;Count thru dirs to del
+	movzbl	#1,r0
+	ret
+30$:	movl	#^x010e0020,(r6)		;Reset the fao descr
+	$fao_s	-				;create source name
+		ctrstr = stkdir,-
+		outlen = (r6),-
+		outbuf = (r6),-
+		p1 = r2
+	clrl	-(SP)
+	pushaq	(r6)				;target name
+	calls	#2,g^LIB$DELETE_LOGICAL		;Poof! Nailed it!
+	brb	20$
+
+.entry	packdirs,	^xffc
+	subl	#40,SP				;space4 source text+descr (32+8)
+	moval	8(SP),4(SP)
+	movaq	(SP),r6				;source descriptor
+	subl	#40,SP				;space4 source text+descr (32+8)
+	moval	8(SP),4(SP)
+	movaq	(SP),r7				;source descriptor
+	clrl	r2				;dirnum counter
+	clrl	r3				;dirtarg counter
+10$:	bbs	r2,dellst,20$
+	cmpl	r2,r3				;are source & target different?
+	bneq	40$				;Go copy the logical
+	incl	r3
+20$:	aobleq	#10,r2,10$			;Count thru dirs to del
+30$:	movzbl	#1,r0
+	ret
+40$:	movl	#^x010e0020,(r6)		;Reset the fao descr
+	$fao_s	-				;create source name
+		ctrstr = stkdir,-
+		outlen = (r6),-
+		outbuf = (r6),-
+		p1 = r2
+	;Get translation of r2 source lnm
+	subl	#264,SP				;space4 trans text+descr
+	moval	8(SP),4(SP)
+	movl	#^x010e0100,(SP)
+	movaq	(SP),r10			;trans descriptor
+	pushl	(r10)				;place4 len-restore in get_lnm
+	pushaq	(r10)				;place to dump translation
+	pushaq	(r6)				;lnm to get trans for
+	calls	#2,w^get_lnm			;try to translate it
+	blbs	r0,50$				;skip any funny business
+	brw	30$				;If source nexist, then eolst
+50$:	movl	#^x010e0020,(r7)		;Reset the fao descr
+	$fao_s	-				;create source name
+		ctrstr = stkdir,-
+		outlen = (r7),-
+		outbuf = (r7),-
+		p1 = r3
+	;Now we need to define (r10) text into target cd$n @(r7)
+	clrq	-(SP)
+	clrl	-(SP)
+	pushaq	(r10)				;text to insert to logical
+	pushaq	(r7)				;target name
+	calls	#5,g^LIB$SET_LOGICAL		;Poof! saved it!
+	clrl	-(SP)
+	;Now remove old source translation
+	pushaq	(r6)				;target name
+	calls	#2,g^LIB$DELETE_LOGICAL		;Poof! Nailed it!
+	incl	r3
+	brw	20$				;And continue the process
+
+;;
+;; ODS-5 additions will require modification of incoming strings to fit into
+;;   255-byte buffersize for logical name definition.
+;;
+.entry	mov_stack,	^xffc
+; This is a recursive procedure so we will never stack a duplicate...
+; we will just swap the duplicate up to CD$0 so it has less tendancy
+; to roll off the bottom.
+	movl	4(AP),r8			;current string for move
+	subl	#40,SP				;space4 source text+descr (32+8)
+	moval	8(SP),4(SP)
+	movl	#^x010e0020,(SP)
+	movaq	(SP),r6				;source descriptor
+	$fao_s	-				;create source name
+		ctrstr = stkdir,-
+		outlen = (r6),-
+		outbuf = (r6),-
+		p1 = r8
+	subl	#264,SP				;space4 trans text+descr
+	moval	8(SP),4(SP)
+	movl	#^x010e0100,(SP)
+	movaq	(SP),r10			;trans descriptor
+	pushl	(r10)				;place4 len-restore in get_lnm
+	pushaq	(r10)				;place to dump translation
+	pushaq	(r6)				;lnm to get trans for
+	calls	#2,w^get_lnm			;try to translate it
+	blbc	r0,30$				;skip any funny business
+; Now we got a good translation... see if it's dup of current insert
+
+	bbs	#SW_V_CSH,switches,20$		;Force string nomatch!
+
+.IF NE,0
+	cmpw	@12(AP),(r10)			;are lengths same?
+	bneq	20$
+.IFF
+	subw3	@12(AP),(r10),r0		;testing for |a-b|<=1
+	cvtwl	r0,r0
+	bgeq	10$
+	mnegl	r0,r0	
+10$:	bicl	#1,r0
+	bneq	20$
+.ENDC
+	movq	@12(AP),r0			;get descrip of source insert
+	movzwl	r0,r0				;strip descrip stuff
+.IF DF,ODS5
+	movzwl	r0,dsc3
+	movl	r1,dsc3+4
+	pushal	dsc3
+	pushal	(r10)
+	calls	#2,g^special_dir_compare
+;PRINTF <Cmp |!AS|!AS|=!UL>,#dsc3,r10,r0
+	tstl	r0
+.IFF
+	cmpc3	r0,(r1),@4(r10)			;see if strings are a match
+.ENDC
+	beql	30$				;stringmatch... replace this 1
+
+20$:	;strings didn't match - recurse a level if possible
+	cmpl	r8,#9				;was this the last level?
+	beql	30$				;yep... scrappit
+
+	pushaq	@12(AP)				;current insert string
+	pushaq	(r10)				;current translation
+	addl3	#1,r8,-(SP)			;new level
+	calls	#3,mov_stack			;do it again
+
+30$:	;Now we need to define current (r8,r6) lognam to prev, or new
+	clrq	-(SP)
+	clrl	-(SP)
+	tstl	4(AP)				;see if we are at top level
+	beql	40$				;yop... spl treat
+	pushaq	@8(AP)				;text to insert to logical
+	pushaq	(r6)				;target name
+	calls	#5,g^LIB$SET_LOGICAL		;Poof! saved it!
+	ret
+40$:	pushaq	@12(AP)				;text to insert to logical
+	pushaq	(r6)				;*source* name
+	calls	#5,g^LIB$SET_LOGICAL		;Poof! saved it!
+	ret
+
+dol_dmp_prv:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	clrl	prevf				;invalidate prev dir
+	cmpl	r2,#^a/0/\^a/*/			;was it a '*'?
+	bneq	20$
+	bsbw	dmp_dol_r2			;do a select
+	blbc	r0,10$				;blow off change for errors
+	cmpl	r2,#10				;is r2 flag value for nochange?
+	bneq	20$				;nope... process it normally
+10$:	brw	30$				;yep... go copy current for NOCH
+20$:	movq	r6,-(SP)			;save r6'r7
+	movl	SP,r7				;save stack pointer
+
+	subl	#40,SP				;space4 source text+descr (32+8)
+	moval	8(SP),4(SP)
+	movl	#^x010e0020,(SP)
+	movaq	(SP),r6				;source descriptor
+	$fao_s	-				;create source name
+		ctrstr = stkdir,-
+		outlen = (r6),-
+		outbuf = (r6),-
+		p1 = r2
+
+	pushaq	prev				;target idsc
+	pushaq	(r6)				;formatted previous dir name
+	calls	#2,w^get_lnm			;try to translate it
+	movl	r0,prevf			;stuff the flags w/result code
+
+	movl	r7,SP				;restore stack pointer
+	movq	(SP)+,r6			;recover r6'r7
+	rsb					;Home to momma!
+30$:	pushr	#^x3f
+	movw	curd0,prev			;copy length
+	movzwl	prev,r0
+	movc3	r0,@curd0+4,@prev+4		;copy text for match
+	popr	#^x3f
+	movl	#1,prevf			;set PREVF is OK
+	rsb
+
+dmp_dol_r2:					;call user to select of CD$*
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	pushr	#^m<r4,r5,r6,r7,r8,r9,r10>	;save r4-r10
+	bsbw	acc_syscom			;access SYS$COMMAND
+	clrq	r4				;r4=MAX valid, r5=#_of_valid
+	movl	r4,r2				;r2 will return number of xlts
+	blbs	r0,10$				;all was OK... proceed
+	brw	40$				;oops! die
+10$:	bsbw	prt_dol_tran			;print a DOL translation
+	blbc	r0,20$				;Oops! Out of translations
+	aobleq	#9,r4,10$			;do for CD$0..9
+20$:	bsbw	deacc_syscom			;deaccess SYS$COMMAND
+	movl	r4,r2				;return number of xlts seen
+40$:	popr	#^m<r4,r5,r6,r7,r8,r9,r10>	;recover r4-r10
+	rsb					;back home
+
+dol_set_prv:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	clrl	prevf				;invalidate prev dir
+	cmpl	r2,#^a/0/\^a/*/			;was it a '*'?
+	bneq	20$
+	bsbw	get_dol_r2			;do a select
+	blbc	r0,10$				;blow off change for errors
+	cmpl	r2,#10				;is r2 flag value for nochange?
+	bneq	20$				;nope... process it normally
+10$:	brw	30$				;yep... go copy current for NOCH
+20$:	movq	r6,-(SP)			;save r6'r7
+	movl	SP,r7				;save stack pointer
+
+	subl	#40,SP				;space4 source text+descr (32+8)
+	moval	8(SP),4(SP)
+	movl	#^x010e0020,(SP)
+	movaq	(SP),r6				;source descriptor
+	$fao_s	-				;create source name
+		ctrstr = stkdir,-
+		outlen = (r6),-
+		outbuf = (r6),-
+		p1 = r2
+
+	pushaq	prev				;target idsc
+	pushaq	(r6)				;formatted previous dir name
+	calls	#2,w^get_lnm			;try to translate it
+	movl	r0,prevf			;stuff the flags w/result code
+
+	movl	r7,SP				;restore stack pointer
+	movq	(SP)+,r6			;recover r6'r7
+	rsb					;Home to momma!
+30$:	pushr	#^x3f
+	movw	curd0,prev			;copy length
+	movzwl	prev,r0
+	movc3	r0,@curd0+4,@prev+4		;copy text for match
+	popr	#^x3f
+	movl	#1,prevf			;set PREVF is OK
+	rsb
+
+get_dol_r2:					;call user to select of CD$*
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	pushr	#^m<r4,r5,r6,r7,r8,r9,r10>	;save r4-r10
+	movzbl	#10,r2				;prepare invalid r2
+	bsbw	acc_syscom			;access SYS$COMMAND
+	clrq	r4				;r4=MAX valid, r5=#_of_valid
+	blbs	r0,10$				;all was OK... proceed
+	brw	40$				;oops! die
+10$:	bsbw	prt_dol_tran			;print a DOL translation
+	blbc	r0,20$				;Oops! Out of translations
+	aobleq	#9,r4,10$			;do for CD$0..9
+20$:	tstl	r5				;were any translations found?
+	beql	30$				;nope... skippit
+	bsbw	get_syscom_num_r5		;get a number, n = {0..r5-1}
+	blbc	r0,30$				;whoops... no number
+	movl	r5,r2				;recover gotten number
+30$:	bsbw	deacc_syscom			;deaccess SYS$COMMAND
+40$:	popr	#^m<r4,r5,r6,r7,r8,r9,r10>	;recover r4-r10
+	rsb					;back home
+
+prt_dol_tran:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	subl	#40,SP				;space4 target text+descr (32+8)
+	moval	8(SP),4(SP)
+	movl	#^x010e0020,(SP)
+	movaq	(SP),r7				;target descriptor
+	$fao_s	-				;create target name
+		ctrstr = stkdir,-
+		outlen = (r7),-
+		outbuf = (r7),-
+		p1 = r4
+	subl	#268,SP				;space4 trans text+descr (260+8)
+	moval	8(SP),4(SP)
+	addl	#4,4(SP)			;fwd 4 chars for 'n - '
+	movl	#^x010e0100,(SP)		;minus 4 chars for 'n - '
+	movaq	(SP),r10			;trans descriptor
+	pushl	(r10)				;place4 len-restore in get_lnm
+	pushaq	(r10)				;place to dump translation
+	pushaq	(r7)				;lnm to get trans for
+	calls	#2,w^get_lnm			;try to translate it
+	addl	#4,SP				;remove extra 'restore' lword
+	blbc	r0,10$				;skip any funny business
+	addl	#4,(r10)			;add back in the 'n - '
+	subl	#4,4(r10)			;backup the translation 'n - '
+	addl3	r4,#^a/0 - /,@4(r10)		;insert 'n - '
+	bsbw	prt_syscom_r10_cr		;prt descr (r10) on SYS$COMMAND
+	incl	r5				;increment # of OK translations
+	movzwl	#SS$_NORMAL,r0			;indicate OK
+10$:	addl	#308,SP				;restore stack
+	rsb					;and return
+
+
+acc_syscom:		;r4 & 5 available
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	$assign_s	-
+		devnam	=	syscom,-
+		chan	=	syscom_chn
+	rsbc
+	movl	SP,r4			;save stack pointer
+	clrl	-(SP)			;place for returned device class
+	clrl	-(SP)			;place for returned dev chars
+	clrq	-(SP)			;IOSB place
+	clrl	-(SP)			;eoitmlst
+	clrl	-(SP)			;no return for devclass
+	moval	b^-4(r4),-(SP)		;address to return device class
+	pushl	#<DVI$_DEVCLASS@16>!4	;get device class code+len
+	clrl	-(SP)			;no return for devchars
+	moval	b^-8(r4),-(SP)		;address to return device chars
+	pushl	#<DVI$_DEVCHAR@16>!4	;get device chars code+len
+	moval	(SP),r5			;point to ITMLST
+;	movab	30$,-(SP)		;shove a cleanup routine onstack
+	$getdviw_s	-
+		chan	=	syscom_chn,-
+		itmlst	=	(r5),-
+		iosb	=	b^-12(r4)
+	blbc	r0,30$			;die if $GETDVI hated us
+	movzwl	b^-12(r4),r0		;retrieve IOSB status
+	blbc	r0,30$			;die if $GETDVI hated us
+	movzwl	#SS$_IVDEVNAM,r0
+	cmpl	b^-4(r4),#DC$_TERM	;wasita TERMINAL?
+	beql	20$
+	bbc	#DEV$V_TRM,b^-8(r4),10$	;*MUST* be terminal
+	bbs	#DEV$V_NET,b^-8(r4),10$	;NET types are illegal
+	bbs	#DEV$V_MBX,b^-8(r4),10$	;Cannot be a mailbox either
+	brb	20$			;done this way for clarity!
+10$:;	rsb				;return an OOPS... not a terminal
+	brb	30$
+20$:	movzwl	#SS$_NORMAL,r0
+	movl	r4,SP			;restore stack & Dont use cleanup rtn
+	rsb
+30$:
+;.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+;		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	movl	r4,SP			;restore stack
+	pushl	r0			;save r0
+	$dassgn_s	-		;zap channel to SYS$COMMAND
+		chan	=	syscom_chn
+	clrl	syscom_chn		;indicate no channel
+	popl	r0			;recover r0
+	rsb				;back to caller
+
+deacc_syscom:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	$dassgn_s	-		;zap channel to SYS$COMMAND
+		chan	=	syscom_chn
+	clrl	syscom_chn		;indicate no channel
+	movzwl	#SS$_NORMAL,r0
+	rsb
+
+prt_syscom_r10_cr:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bsbb	prt_syscom_r10
+	rsbc
+	bsbb	prt_syscom_cr
+	rsb
+prt_syscom_cr:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	clrl	syscom_crpen
+	clrq	-(SP)
+	moval	(SP),r0
+	$qiow_s	-
+		chan	=	syscom_chn,	-
+		func	=	#IO$_WRITEVBLK,-
+		iosb	=	(r0),-
+		p1	=	qi20$,-
+		p2	=	#2
+	addl	#8,SP
+	rsb
+	.psect	$local
+qi20$:	.byte	10,13
+	.psect	$code
+
+prt_syscom_r10:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	tstl	syscom_chn
+	bneq	10$
+	movzwl	#SS$_IVCHAN,r0
+	rsb
+10$:	tstl	syscom_crpen
+	beql	20$
+	bsbw	prt_syscom_cr
+20$:	clrq	-(SP)
+	moval	(SP),r0
+	movzwl	(r10),r1
+	$qiow_s	-
+		chan	=	syscom_chn,	-
+		func	=	#IO$_WRITEVBLK,-
+		iosb	=	(r0),-
+		p1	=	@4(r10),-
+		p2	=	r1
+	addl	#8,SP
+	rsb
+
+	.psect	$local
+prmptx:	.ascid	/_Selection: /
+exits:	.ascid	<^x1b>/[7mExit/<^x1b>/[m/
+quits:	.ascid	<^x1b>/[7mQuit/<^x1b>/[m/
+	.psect	$code
+get_syscom_num_r5:		;get a number, n = {0..r5-1}
+.jsb_entry	input=<r5>,-;input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	pushr	#^xffc
+	movl	SP,r8
+	movaq	prmptx,r10
+	bsbw	prt_syscom_r10
+10$:	clrl	-(SP)
+	calls	#1,syscom_getkey	;go get a single keystroke (^Z auto)
+	blbc	r0,30$			;jmp if returned an error
+	movzwl	#SS$_ABORT,r0		;prep a fake error
+	bicl3	#^x20,r1,r2
+	cmpl	r2,#^a/Q/		;Quit command
+	beql	30$
+	cmpl	r1,s^#13		;is it a CR (==Quit)
+	beql	30$
+	subl	s^#^a/0/,r1		;change to bin0..9
+	blssu	20$			;Whoops! Too small!
+	cmpl	r5,r1			;see if r5 is bigger (should be)
+	blequ 	20$			;Nope... invalid number
+	addl3	s^#^a/0/,r1,-(SP)	;stack & reconvert to character
+	movl	r1,r2			;save bin value
+	pushal	(SP)
+	movl	#^x010e0001,-(SP)
+	moval	(SP),r10
+	bsbw	prt_syscom_r10		;echo character
+	movl	r2,r1			;restore bin value of key
+	brw	50$			;leave
+20$:	bsbw	syscom_bel		;indicate an error
+	brw	10$
+30$:	cmpl	r0,#SS$_ENDOFFILE	;was it ^Z?
+	bneq	40$
+	movaq	exits,r10
+	pushl	r0
+	bsbw	prt_syscom_r10		;print Exit annunciation
+	popl	r0
+	brb	50$
+40$:	cmpl	r0,#SS$_ABORT		;was it Quit?
+	bneq	50$
+	movaq	quits,r10
+	pushl	r0
+	bsbw	prt_syscom_r10		;print Exit annunciation
+	popl	r0
+50$:	movl	r8,SP
+	popr	#^xffc
+	movl	r1,r5
+	rsb
+
+	.psect	$local
+prmpty:	.ascid	| ? (Y/N/Q) [N]: |
+	.psect	$code
+get_syscom_yn_r5:		;get 'Y','N','Q' into r5
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	pushr	#^xffc
+	movl	SP,r8
+	movaq	prmpty,r10
+	bsbw	prt_syscom_r10
+
+10$:	movzbl	s^#1,-(SP)
+	calls	#1,syscom_getkey	;go get a single keystroke ('Y' auto)
+	blbc	r0,30$			;jmp if returned an error
+	bicl3	#^x20,r1,r2
+	movzbl	#^a/N/,r5		;prep a 'N'
+	cmpl	r2,#^a/N/		;'No' command
+	beql	30$
+	cmpl	r1,s^#13		;is it a CR (=='No')
+	beql	30$
+	movzbl	#^a/Y/,r5		;prep a 'Y'
+	cmpl	r2,#^a/Y/		;'Yes' command
+	beql	30$
+	movzbl	#^a/Q/,r5		;prep a 'Q'
+	cmpl	r2,#^a/Q/		;'Quit' command
+	beql	30$
+	bsbw	syscom_bel		;indicate an error
+	brw	10$
+30$:	blbc	r0,40$			;go annunciate other operations
+	movzbl	r5,-(SP)		;stack & reconvert to character
+	pushal	(SP)
+	movl	#^x010e0001,-(SP)
+	moval	(SP),r10		;describe the char
+	brb	45$			;go print result
+40$:	cmpl	r0,#SS$_ENDOFFILE	;was it ^Z?
+	bneq	50$
+	movzbl	#^a/Q/,r5		;indicate a quit op
+	movzwl	#SS$_NORMAL,r0		;indicate an OK end anyway
+	movaq	exits,r10
+45$:	pushl	r0
+	bsbw	prt_syscom_r10		;print Exit annunciation
+	popl	r0
+50$:	bisl	#1,syscom_crpen
+	movl	r5,r1
+	movl	r8,SP
+	popr	#^xffc
+	movl	r1,r5
+	rsb
+
+syscom_getchr:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	$qiow_s	-
+		chan	=	syscom_chn,	-
+		func	=	#IO$_READVBLK!IO$M_NOFILTR!IO$M_NOECHO!IO$M_TRMNOECHO,-
+		iosb	=	(r4),-
+		p1	=	@4(r2),-
+		p2	=	(r2),-
+		p4	=	#trmlst
+	rsb
+;.entry	syscom_getkey,	^xffc
+.call_entry,	0,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=syscom_getkey
+	tstl	(AP)				;did we get an auto flag?
+	beql	5$
+	bbc	#SW_V_AUTO,switches,5$
+	tstl	4(AP)				;is it auto 'Y' or ^Z?
+	bneq	3$				;may be too far
+	movzwl	#SS$_ENDOFFILE,r0
+	ret
+3$:	movzbl	#^a/Y/,r1			;force a 'Y'
+	movzwl	#SS$_NORMAL,r0			;force success
+	ret
+5$:	clrq	-(SP)
+	clrq	-(SP)
+	moval	8(SP),4(SP)
+	movzbl	#1,(SP)				;make a 1 byte buffer
+	movaq	(SP),r2				;point to input buffer (1 char)
+	clrq	-(SP)				;space for IOSB
+	movaq	(SP),r4				;point at it with r4
+10$:	bsbw	syscom_getchr			;go get a character
+	blbc	r0,12$
+	bsbw	20$				;go translate escape sequence
+;following test may be backerds
+	tstl	r0
+	bneq	10$
+	tstl	r1
+	beql	15$
+12$:	ret
+15$:	movzbl	b^4(r4),r1
+	movzbl	#1,r0				;make sure & return LBS
+	ret
+20$:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>;,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	cmpb	b^4(r4),#^x1a
+	beql	30$
+	cmpb	b^4(r4),#^x1b
+	beql	40$
+	xorl	r1,r1
+	movl	r1,r0
+	rsb
+30$:	movzwl	#SS$_ENDOFFILE,r0
+	ret
+40$:	bsbw	syscom_getchr
+	cmpb	b^4(r4),#^a/[/
+	beql	60$
+	cmpb	b^4(r4),#^a/O/
+	beql	50$
+	bsbw	syscom_bel
+	movzbl	#1,r0
+	rsb
+50$:	brw	110$
+60$:	bsbw	syscom_getchr
+	subb3	#^x30,b^4(r4),r0
+	blssu	100$
+	cmpb	#^xa,r0
+	blequ	100$
+	clrl	r8
+70$:	mull	#10,r8
+	addl	r0,r8
+	bsbw	syscom_getchr
+	subb3	#^x30,b^4(r4),r0
+	blssu	80$
+	cmpb	#^xa,r0
+	bgtru	70$
+80$:	cmpb	b^4(r4),#^a/~/
+	beql	90$
+	bsbw	syscom_bel
+	movzbl	#1,r0
+	rsb
+90$:	brw	fkeyr8
+100$:	cmpb	b^4(r4),#^a/A/
+	bneq	101$
+	brw	upar
+101$:	cmpb	b^4(r4),#^a/B/
+	bneq	102$
+	brw	dnar
+102$:	cmpb	b^4(r4),#^a/C/
+	bneq	103$
+	brw	rtar
+103$:	cmpb	b^4(r4),#^a/D/
+	bneq	104$
+	brw	lfar
+104$:	bsbw	syscom_bel
+	movzbl	#1,r0
+	rsb
+110$:	bsbw	syscom_getchr
+	clrl	r8
+	movb	b^4(r4),r0
+120$:	cmpb	r0,t140$[r8]
+	beql	130$
+	incl	r8
+	tstb	t140$[r8]
+	bneq	120$
+	bsbw	syscom_bel
+	movzbl	#1,r0
+	rsb
+130$:	movzwl	t150$[r8],r1
+	xorl	r0,r0
+	rsb
+	.psect	$local
+t140$:	.asciz	/PQRSwxymtuvlqrsMpn/
+t150$:	.word	GK_PF1,GK_PF2,GK_PF3,GK_PF4
+	.word	GK_KP7,GK_KP8,GK_KP9,GK_KPMINUS
+	.word	GK_KP4,GK_KP5,GK_KP6,GK_KPCOMMA
+	.word	GK_KP1,GK_KP2,GK_KP3,GK_KPENTER
+	.word	GK_KP0,GK_KPPERIOD
+	.psect	$code
+fkeyr8:	cmpl	r8,#34
+	blequ	20$
+10$:	bsbw	syscom_bel
+	movzbl	#1,r0
+	rsb
+20$:	cmpl	r8,#30
+	beql	10$
+	cmpl	r8,#27
+	beql	10$
+	cmpl	r8,#22
+	beql	10$
+	cmpl	r8,#17
+	bgtru	30$
+	cmpl	r8,#6
+	bgtru	10$
+	tstl	r8
+	beql	10$
+30$:	movzwl	t40$[r8],r1
+	xorl	r0,r0
+	rsb
+	.psect	$local
+t40$:	.word	0	;0
+	.word	GK_E1,GK_E2,GK_E3,GK_E4,GK_E5,GK_E6
+	.word	0,0,0,0,0,0,0,0,0,0,0
+	.word	GK_F7,GK_F8,GK_F9,GK_F10
+	.word	0	;22
+	.word	GK_F11,GK_F12,GK_F13,GK_F14
+	.word	0	;27
+	.word	GK_F15,GK_F16
+	.word	0	;30
+	.word	GK_F17,GK_F18,GK_F19,GK_F20
+	.psect	$code
+upar:	movl	#GK_UPARROW,r1
+	xorl	r0,r0
+	rsb
+dnar:	movl	#GK_DNARROW,r1
+	xorl	r0,r0
+	rsb
+rtar:	movl	#GK_RTARROW,r1
+	xorl	r0,r0
+	rsb
+lfar:	movl	#GK_LFARROW,r1
+	xorl	r0,r0
+	rsb
+
+syscom_bel:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	$qiow_s	-
+		chan	=	syscom_chn,	-
+		func	=	#IO$_WRITEVBLK,-
+		p1	=	qi10$,-
+		p2	=	#1
+	rsb
+	.psect	$local
+qi10$:	.byte	7
+	.psect	$code
+
+sel_wild:	;do a wildcard selection... buffer contains string
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bsbw	acc_syscom		;access SYS$COMMAND
+	blbs	r0,10$			;SYS$COMMAND got to ok
+	movzwl	#ST_C_NOCHANGE,r0	;indicate nochange
+	rsb				;and blow out
+10$:	pushr	#^xffc			;save all registers
+	bsbw	cre_wild		;create filespec for wildcard
+	blbs	r0,20$
+	popr	#^xffc			;recover registers
+	pushl	r0
+	bsbw	deacc_syscom		;drop access to SYS$COMMAND
+	popl	r0
+	rsb
+20$:	pushaq	tmp1
+	pushaw	cnf_wild
+	calls	#2,fscan		;do the file scan
+	blbs	r0,40$			;it was a success.. musta got one
+	cmpl	r0,#RMS$_DNF		;see if 'dir not found' error
+	bneq	30$			;nope... try another
+	movzwl	#ST_C_DIRNEX,r0		;indicate 'dirnex'
+	brb	40$
+30$:	cmpl	r0,#RMS$_NMF		;see if 'no more files' error
+	bneq	40$			;nope... return 'as is'
+	movzwl	#ST_C_NOCHANGE,r0	;indicate 'nochange'
+40$:	popr	#^xffc			;recover registers
+	pushl	r0
+	bsbw	deacc_syscom		;drop access to SYS$COMMAND
+	popl	r0
+	rsb				;blow us off
+
+.entry	cnf_wild,	^xffc
+	movl	4(AP),r11		;point @ FAB
+	movaq	@8(AP),r10		;found this dir
+
+	movzwl	(r10),r6		;get strlen of retrieved dirname
+	movc3	r6,@4(r10),@tmp2+4	;make copy of retrieved dirname
+	movw	r6,tmp2			;tmp2 now's a copy of retrieved dirname
+
+	movaq	tmp2,r10		;get address if copied retrieved dirname
+
+;Ok... need to locate ']????.' seq & patch to be a full directory spec.
+;r10 is address of descrip of whole selection
+	movq	(r10),r6		;get descrip
+	movzwl	r6,r6			;remove descrip junk
+	clrl	r8			;index register
+10$:
+.IF DF,ODS5
+	cmpb	(r7)[r8],#^a/^/		;see if it's an escape char
+	bneq	15$
+	incl	r8			;ditch escape char
+	aoblss	r6,r8,15$		;and following char...do 'til found
+	brw	90$			;buggit... should be a ']' around here
+15$:
+.ENDC
+	cmpb	(r7)[r8],#^a/]/		;find the ']'
+	beql	20$			;found it
+	aoblss	r6,r8,10$		;do 'til found
+	brw	90$			;buggit... should be a ']' around here
+20$:	movb	#^a/./,(r7)[r8]		;force ']' to be a '.'
+	aoblss	r6,r8,30$		;skip off the '.'
+	brw	90$			;buggit... string shouldn't be MT
+30$:
+.IF DF,ODS5
+	cmpb	(r7)[r8],#^a/^/		;find an escape char
+	bneq	35$
+	incl	r8			;ditch escape char
+	aoblss	r6,r8,35$		;search 'til '.'
+	brw	90$			;buggit... string shouldn't end
+35$:
+.ENDC
+	cmpb	(r7)[r8],#^a/./		;find the next '.'
+	beql	40$			;found the '.'
+	aoblss	r6,r8,30$		;search 'til '.'
+	brw	90$			;buggit... string shouldn't end
+40$:	movb	#^a/]/,(r7)[r8]		;complete the dirspec
+	addw3	#1,r8,(r10)		;punch in new length
+
+;;ODS-5 honors case - so now must we
+;;	pushaq	tmp2
+;;	pushaq	tmp2
+;;	calls	#2,g^STR$UPCASE		;force result to upper case
+
+	movq	(r10),r6		;get a copy of the descriptor
+	movzwl	r6,r6			;remove descriptor trash
+50$:	cmpb	(r7),#^a/[/		;see if we got the '['
+	beql	55$			;found the leading '['
+	incl	r7			;skippabyte
+	sobgtr	r6,50$			;scan whole string
+	brw	90$			;buggit... string shouldn't end
+55$:	movq	r6,-(SP)
+	movl	r6,r8			;save length
+	movaq	(SP),r7			;point at descriptor
+	bsbw	normalize_r7		;go fixup any leading [000000.
+	movw	(SP)+,r6		;recover [modified] descriptor
+	subl	r6,r8			;r8 is oversize count
+	subw	r8,(r10)		;patch main descriptor
+
+; Now go get input crap & start the real confirm
+	movl	4(AP),r11		;point @ FAB
+	movaq	tmp2,r10		;found this dir (munged)
+	bsbw	prt_syscom_r10		;print the dir name
+	bsbw	get_syscom_yn_r5	;get an answer from user
+	blbs	r0,70$
+60$:	mnegl	#ST_C_NOCHANGE,fab$l_ctx(r11)	;this stops the wild proc
+	ret				;kablamma
+70$:	cmpb	#^a/Q/,r5		;user wanna quit?
+	beql	60$
+	cmpb	#^a/N/,r5		;user wanna skippit?
+	bneq	80$
+	ret				;skippit
+80$:	cmpb	#^a/Y/,r5		;user wanna take it?
+	beql	100$
+90$:	mnegl	#ST_C_BUGCHECK,fab$l_ctx(r11)	;this stops the wild proc
+	ret				;kablamma
+100$:	;Ok... dir selected... need to recopy tmp2 to buffer
+	;in place of the original wildcard
+	mnegl	#ST_C_NEWDIR,fab$l_ctx(r11)	;insert completion code
+	movzwl	tmp2,r6			;get tmp2 strlen
+	movc3	r6,@tmp2+4,@buffer+4	;make copy to buffer
+	movw	r6,buffer		;tmp2's ben copied to buffer
+	ret				;exit & try again
+
+cre_wild:	;all registers legal here!
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+.IF DF,OLD_WCARDS
+;Following section was first-pass attempt at getting the wildcard stuff
+;working... What I tried to do for a command like: 'CD [DIR1.*.*]' was to
+;present the user with all files [DIR1.*]... then proceed to the subsequent
+;[.*]. This turns out to be incorrect when dealing with a command like:
+;'CD [DIR1.*.*.DIR2]' because the user is presented with selections for the
+;first and second wildcards as if [.DIR2] exists, when in fact, .DIR2 does
+;not necessarily exist at all.  I have replaced this with an algorithm that
+;searches down to the tail-end of the specification, and presents *ALL*
+;matching directory choices, since this does not exhibit the aforementioned
+;anomalous behavior.  Additionally, the preceeding functionality can be
+;recovered by using a multipath specification such as (for the first command):
+;'CD [DIR1.*] *'. Ha! Nailed *THAT* sukker!
+	movq	buffer,r2		;r2'r3 describes buffer
+	movzwl	r2,r2			;clean out any descrip junk
+	bsbw	fnd_wild		;find marker for start of wild name
+	rsbc				;return an oops
+	movl	tmp1+4,r8		;get data address for tmp1
+	movc3	r9,(r3),(r8)		;move non-wild text to tmp1
+	addw3	r7,r9,tmp1		;set length (include to be added '/0/]')
+	movb	#^a/]/,(r8)[r9]		;insert trailing ']'
+	cmpl	r7,#1			;see if we should've stuffed only 1
+	beql	10$			;branch... we already stuffed it
+	movab	(r8)[r9],r0		;get address to insert to
+	movl	#^a/0000/,(r0)+		;insert '0000'
+	movw	#^a/00/,(r0)+		;insert '00'
+	movb	#^a/]/,(r0)+		;insert ']'
+10$:	movc3	r10,(r11),@tmp2+4
+	movw	r10,tmp2
+	movq	tmp1,r6			;get tmp1
+	movzwl	r6,r6
+	movq	tmp2,r8			;get tmp2
+	movzwl	r8,r8
+	movc3	r8,(r9),(r7)[r6]	;append tmp2 to tmp1
+	addw3	r8,r6,tmp1		;and set length accordingly
+	movq	r10,dsc0		;save descriptor of wild guy
+	movzwl	#SS$_NORMAL,r0		;indicate all's well that ends well
+	rsb				;go home
+
+fnd_wild:	;r2'r3 marks search address
+	clrl	r8			;char count of non-wild chars
+	clrl	r9			;char count of non-wild segments
+	clrl	r7			;indexer register
+10$:
+.IF DF,ODS5
+	cmpb	(r3)[r7],#^a/^/		;is it an escape?
+	bneq	15$
+	incl	r7			;Skip the escape char
+	movl	r7,r8			;update count of non-wild chars
+	aoblss	r2,r7,15$		;go do next char
+	movzwl	#SS$_ENDOFFILE,r0	;indicate out of chars
+	rsb
+15$:
+.ENDC
+	cmpb	(r3)[r7],#^a/./		;is it a separator?
+	beql	20$
+	cmpb	(r3)[r7],#^a/[/		;is it a separator?
+	bneq	40$
+20$:	movl	r7,r9			;mark position of last separator
+30$:	movl	r7,r8			;update count of non-wild chars
+	aoblss	r2,r7,10$		;go do next char
+	movzwl	#SS$_ENDOFFILE,r0	;indicate out of chars
+	rsb
+40$:	cmpb	(r3)[r7],#^a/*/		;is it a '*'?
+	beql	50$			;go process it
+	cmpb	(r3)[r7],#^a/%/		;is it a '%'?
+	bneq	30$			;continue ripping up the string
+50$:	;now... we've found a wildcard...
+	movl	r9,r11			;make new copy of r9 (last set pos)
+	movzbl	#7,r1			;indicate requirement to add '000000]'
+	cmpb	(r3)[r9],#^a/[/		;see if there was a separator
+	beql	60$
+	bicb	#6,r1			;change to add simply ']'
+	cmpb	(r3)[r9],#^a/./		;see if there was a separator
+	bneq	70$			;nope... don't remove one
+	decl	r9			;remove separator
+60$:	incl	r11			;remove separator
+70$:	movl	r11,r7			;reset to start of wild guy
+80$:
+.IF DF,ODS5
+	cmpb	(r3)[r7],#^a/^/		;is it an escape?
+	bneq	85$
+	incl	r7			;Skip the escape char
+	aoblss	r2,r7,85$		;go do next char
+	movzwl	#SS$_ENDOFFILE,r0	;indicate out of chars
+	rsb
+85$:
+.ENDC
+	cmpb	(r3)[r7],#^a/./		;is it a '.'?
+	beql	90$			;found end
+	cmpb	(r3)[r7],#^a/]/		;is it a ']'?
+	beql	90$			;found end
+	aoblss	r2,r7,80$		;do for whole string remainder
+	movzwl	#SS$_ENDOFFILE,r0	;indicate out of chars
+	rsb
+90$:	subl3	r11,r7,r10		;len of wild guy
+	incl	r9			;change from index to length
+	movab	(r3)[r11],r11		;convert r11 from index to address
+	movl	r1,r7			;move len of extra insert to r7
+	movzwl	#SS$_NORMAL,r0		;indicate normal completion
+	rsb
+.IFF
+;Following is the replacement code for the old wildcarding routines
+	movq	buffer,r2		;r2'r3 describes buffer
+	movzwl	r2,r2			;clean out any descrip junk
+	bsbw	fnd_tail		;find tail directory spec
+	rsbc				;return an oops
+;returns r10'r11 describing tail item
+;returns r9 as length of valid header text
+;returns r7 as length of insert for '000000]' or ']'
+	movl	tmp1+4,r8		;get data address for tmp1
+	movc3	r9,(r3),(r8)		;move pre-tail text to tmp1
+	addw3	r7,r9,tmp1		;set length (include to be added '/0/]')
+	movb	#^a/]/,(r8)[r9]		;insert trailing ']'
+	cmpl	r7,#1			;see if we should've stuffed only 1
+	beql	10$			;branch... we already stuffed it
+	movab	(r8)[r9],r0		;get address to insert to
+	movl	#^a/0000/,(r0)+		;insert '0000'
+	movw	#^a/00/,(r0)+		;insert '00'
+	movb	#^a/]/,(r0)+		;insert ']'
+10$:	movc3	r10,(r11),@tmp2+4
+	movw	r10,tmp2
+	movq	tmp1,r6			;get tmp1
+	movzwl	r6,r6
+	movq	tmp2,r8			;get tmp2
+	movzwl	r8,r8
+	movc3	r8,(r9),(r7)[r6]	;append tmp2 to tmp1
+	addw3	r8,r6,tmp1		;and set length accordingly
+	movq	r10,dsc0		;save descriptor of wild guy
+	movzwl	#SS$_NORMAL,r0		;indicate all's well that ends well
+	rsb				;go home
+
+fnd_tail:	;r2'r3 marks search address
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	clrl	r8			;char count of non-wild chars
+	clrl	r9			;char count of non-wild segments
+	clrl	r7			;indexer register
+10$:
+.IF DF,ODS5
+	cmpb	(r3)[r7],#^a/^/		;is it an escape?
+	bneq	15$
+	incl	r7
+	movl	r7,r8			;update count of non-wild chars
+	aoblss	r2,r7,15$		;go do next char
+	movzwl	#ST_C_BUGCHECK,r0	;indicate a big BooBoo
+	rsb
+15$:
+.ENDC
+	cmpb	(r3)[r7],#^a/./		;is it a separator?
+	beql	20$
+	cmpb	(r3)[r7],#^a/[/		;is it a separator?
+	bneq	40$
+20$:	movl	r7,r9			;mark position of last separator
+30$:	movl	r7,r8			;update count of non-wild chars
+	aoblss	r2,r7,10$		;go do next char
+	movzwl	#ST_C_BUGCHECK,r0	;indicate a big BooBoo
+	rsb
+40$:	cmpb	(r3)[r7],#^a/]/		;is it the trailing ']'?
+	bneq	30$			;continue ripping up the string
+50$:	;now... we've found the tail directory segment spanned by r9..r7
+;This r9..r7 segment is of the following forms:
+;  [xxxx'.tail]'  -> substitute as [xxxx]tail.dir;1
+;  '[tail]'       -> substitute as [000000]tail.dir;1
+	movl	r9,r11			;make new copy of r9 (last sep. pos)
+	movzbl	#7,r1			;indicate requirement to add '000000]'
+	cmpb	(r3)[r9],#^a/[/		;see if there was a separator
+	beql	60$
+	bicb	#6,r1			;change to add simply ']'
+	cmpb	(r3)[r9],#^a/./		;see if there was a separator
+	bneq	70$			;nope... don't remove one
+	decl	r9			;remove separator
+60$:	incl	r11			;remove separator
+70$:	subl3	r11,r7,r10		;length of tail item
+	incl	r9			;change from index to length
+	movab	(r3)[r11],r11		;convert r11 from index to address
+	movl	r1,r7			;move len of extra insert to r7
+;returns r10'r11 describing tail item
+;returns r9 as length of valid header text
+;returns r7 as length of insert for '000000]' or ']'
+	movzwl	#SS$_NORMAL,r0		;indicate normal completion
+	rsb
+.ENDC
+
+;args are (actrtn, string_by_descriptor)
+	.psect	$local
+starstar:	.ascid		/sys$disk:[]*.dir;1/
+	.psect	$code
+.entry	fscan,	^xffc
+ASSUME <FAB$C_BLN&3> EQ 0		;assume FAB length is LWORD aligned
+	subl	#FAB$C_BLN,SP		;make space for fab
+	moval	(SP),r6			;point to FAB
+	movc5	#0,#0,#0,#FAB$C_BLN,(r6);zero FAB
+	movb	#FAB$C_BID,FAB$B_BID(r6);set type as FAB
+	movb	#FAB$C_BLN,FAB$B_BLN(r6);set length of FAB
+.IF DF,ODS5
+ASSUME <NAML$C_BLN&3> EQ 0		;assume NAML length is LWORD aligned
+	subl	#NAML$C_BLN,SP		;make space for nam
+	moval	(SP),r7			;point to NAML
+	movc5	#0,#0,#0,#NAML$C_BLN,(r7);zero NAML
+	movb	#NAML$C_BID,NAML$B_BID(r7);set type as NAML
+	movb	#NAML$C_BLN,NAML$B_BLN(r7);set length of NAML
+ASSUME 4096 GE NAML$C_MAXRSS
+ASSUME 256 GE NAM$C_MAXRSS
+	subl	#4096,SP		;make room for long resultant string
+	subl	#256,SP			;make room for resultant string
+	movab	(SP),r8			;point to resultant string
+	subl	#4096,SP		;make room for long expanded string
+	subl	#256,SP			;make room for expanded string
+	movab	(SP),r9			;point to expanded string
+.IFF
+ASSUME <NAM$C_BLN&3> EQ 0		;assume NAM length is LWORD aligned
+	subl	#NAM$C_BLN,SP		;make space for nam
+	moval	(SP),r7			;point to NAM
+	movc5	#0,#0,#0,#NAM$C_BLN,(r7);zero NAM
+	movb	#NAM$C_BID,NAM$B_BID(r7);set type as NAM
+	movb	#NAM$C_BLN,NAM$B_BLN(r7);set length of NAM
+ASSUME 256 GE NAM$C_MAXRSS
+	subl	#256,SP			;make room for resultant string
+	movab	(SP),r8			;point to resultant string
+	subl	#256,SP			;make room for expanded string
+	movab	(SP),r9			;point to expanded string
+.ENDC
+	moval	(r7),fab$l_nam(r6)	;insert NAM address into FAB
+	movq	@8(AP),r0		;get string in r0'r1
+	movzwl	r0,r0			;clean off descrip stuff
+.IF DF,ODS5
+	movl	r1,NAML$L_LONG_FILENAME(r7)
+	movw	r0,NAML$L_LONG_FILENAME_SIZE(r7)
+	mnegl	s^#1,fab$l_fna(r6)
+;;	movl	r1,fab$l_fna(r6)	;insert filename address into FAB
+;;	movb	r0,fab$b_fns(r6)	;insert name len into FAB
+.IFF
+	movl	r1,fab$l_fna(r6)	;insert filename address into FAB
+	movb	r0,fab$b_fns(r6)	;insert name len into FAB
+.ENDC
+	movl	starstar+4,fab$l_dna(r6);insert default "*.*;*" into FAB
+	movb	starstar,fab$b_dns(r6)	;set default size into FAB
+	movl	4(AP),fab$l_ctx(r6)	;insert action routine offset
+	movb	#FAB$C_RFM_DFLT,fab$b_rfm(r6)	;set default RFM
+
+	movb	#NAM$C_MAXRSS,nam$b_rss(r7)	;set max resultant size
+	movl	r8,nam$l_rsa(r7)		;insert RSA address
+	movb	#NAM$C_MAXRSS,nam$b_ess(r7)	;set max expanded size
+	movl	r9,nam$l_esa(r7)		;insert ESA address
+.IF DF,ODS5
+	movl	#NAML$C_MAXRSS,naml$l_long_expand_alloc(r7)
+	movl	#NAML$C_MAXRSS,naml$l_long_result_alloc(r7)
+	movab	256(r8),naml$l_long_result(r7)
+	movab	256(r9),naml$l_long_expand(r7)
+.ENDC
+
+10$:	mnegl	fab$l_ctx(r6),r0	;recover possible completion code
+	bgeq	20$			;ctx was negative... return a code
+	pushaw	fsc_error		;error routine
+	pushaw	fsc_success		;success routine
+	pushal	(r6)			;address of source FAB
+	calls	#3,g^LIB$FILE_SCAN	;go scan for matching files
+	blbs	r0,10$
+	mnegl	fab$l_ctx(r6),r1	;recover possible completion code
+	blss	20$			;ctx was positive... this err's real
+	movl	r1,r0			;return ctx error instead
+20$:	pushl	r0
+	pushal	(r6)
+	calls	#1,g^LIB$FILE_SCAN_END
+	popl	r0
+	ret
+
+.entry	fsc_error,	0
+	ret
+
+.entry	fsc_success,	^xffc
+	moval	@4(AP),r2		;point at OK FAB
+	movl	fab$l_nam(r2),r3	;point at OK NAM
+
+.IF DF,ODS5
+	pushl	naml$l_long_result(r3)		;push resultant address
+	movzwl	naml$l_long_result_size(r3),-(SP) ;shove len on top 4 descrip
+.IFF
+	pushl	nam$l_rsa(r3)		;push resultant address
+	movzbl	nam$b_rsl(r3),-(SP)	;shove len on top making descrip
+.ENDC
+	moval	(SP),r4			;point to descrip
+	bisl	#^x010e0000,(r4)	;change to static descrip
+
+	pushaq	(r4)			;pass described resultant string
+	pushl	4(AP)			;pass FAB also
+	calls	#2,@fab$l_ctx(r2)	;callback the action routine
+	mnegl	fab$l_ctx(r2),r0	;is a status there?
+	blss	10$			;went neg... must not be
+	pushl	4(AP)
+	calls	#1,g^LIB$FILE_SCAN_END	;try to abort file_scan
+10$:	movzwl	#1,r0
+	ret
+	.end

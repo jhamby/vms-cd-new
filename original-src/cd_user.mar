@@ -1,0 +1,59 @@
+	.title	CD_USER - User-written personal device interpreter
+
+	$ssdef
+	$uaidef
+
+;Argument list to user api is:
+
+;	p1=(FAO resultant descriptor)
+;	p2=(invoking devnam)
+;	p3=(target-buffer descr)
+;	p4=(return modified buflen)
+
+.entry	CD_PROCESS,	^xffc
+	subl	#32,SP
+	pushab	(SP)
+	movl	#32,-(SP)		;create descr
+	movab	(SP),r8			;points to defdev descr
+	subl	#64,SP
+	pushab	(SP)
+	movl	#64,-(SP)		;create descr
+	movab	(SP),r9			;points to defdir descr
+
+	clrl	-(SP)			;tail the itmlst
+	clrl	-(SP)			;no retlen
+	pushab	@4(r9)			;bufadr for defdir
+	pushl	#<UAI$_DEFDIR@16>!64	;itmcode|len
+	clrl	-(SP)			;no retlen
+	pushab	@4(r8)			;bufadr for defdev
+	pushl	#<UAI$_DEFDEV@16>!32	;itmcode|len
+	moval	(SP),r5
+	$getuai_s	-
+		usrnam	=	@4(AP),-
+		itmlst	=	(r5)
+	blbs	r0,20$
+	$exit_s	-
+		code	=	r0
+10$:	$exit_s	-
+		code = #SS$_BUFFEROVF
+20$:	movab	@4(r8),r0
+	movzbl	(r0)+,(r8)
+	movab	(r0),4(r8)
+	movab	@4(r9),r0
+	movzbl	(r0)+,(r9)
+	movab	(r0),4(r9)
+	movq	@12(AP),r6
+	movzwl	r6,r6
+	movzwl	(r8),r10
+	movc5	r10,@4(r8),#0,r6,(r7)
+	subl	r10,r6
+	blss	10$
+	movzwl	(r9),r11
+	movc5	r11,@4(r9),#0,r6,(r7)[r10]
+	subl	r11,r6
+	blss	10$
+	addl3	r10,r11,r3		;compute total length
+	movw	r3,@16(AP)		;write resultant length
+	movl	#1,r0
+	ret
+	.end

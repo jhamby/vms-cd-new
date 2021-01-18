@@ -1,0 +1,158 @@
+	.title	CD - Change directory AKA Unix/MSDOS
+	.ident	'CD V6.0'
+;++
+;
+; Program:	CD.MAR V6.0
+; Author:	TECSys Development, Inc.
+; Date:		96.06.05
+; Updated:	98.08.07
+;
+; License:
+;    Ownership of and rights to these programs is retained by the author(s).
+;    Limited license to use and distribute the software in this library is
+;    hereby granted under the following conditions:
+;      1. Any and all authorship, ownership, copyright or licensing
+;         information is preserved within any source copies at all times.
+;      2. Under absolutely *NO* circumstances may any of this code be used
+;         in any form for commercial profit without a written licensing
+;         agreement from the author(s).  This does not imply that such
+;         a written agreement could not be obtained.
+;      3. Except by written agreement under condition 2, source shall
+;         be freely provided with all executables.
+;      4. Library contents may be transferred or copied in any form so
+;         long as conditions 1, 2, and 3 are met.  Nominal charges may
+;         be assessed for media and transferral labor without such charges
+;         being considered 'commercial profit' thereby violating condition 2.
+;
+; Warranty:
+;    These programs are distributed in the hopes that they will be useful, but
+;    WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+;    or FITNESS FOR A PARTICULAR PURPOSE.
+;
+;--
+
+	$dscdef			;Descriptor constants
+	$libdef			;LIB$ routine return codes
+	$lnmdef			;Logical name translation codes
+	$psldef			;Need PSL$C_SUPER
+	$rmsalldef		;RMS structs & return codes etc.
+	$ssdef			;System return codes
+	$stsdef			;status bits
+
+	.psect	$local,pic,noshr,noexe,rd,wrt,long
+hlpfab: $fab    fnm=<cdhelp>,dnm=<sys$help:.hlb>,fac=get,shr=<get>
+buf:	.byte	0,0,DSC$K_DTYPE_T,DSC$K_CLASS_D,0,0,0,0
+retblk:	.long
+cmdstr:	.ascid	/if f$search("cd.com").nes."" then @cd/
+hlpcmd:	.ascid	/help @cdhelp cd/
+hlplnm:	.ascid	/CDHELP/
+fildev:	.ascid	/LNM$FILE_DEV/
+
+	.psect	$code,pic,shr,exe,rd,nowrt
+; Parser setup & call
+.entry	cd,	^m<r2,r3>
+	pushaw	buf
+	clrl	-(SP)			;no prompt... don't prompt user
+	pushaq	buf
+	calls	#3,G^LIB$GET_FOREIGN	; Get caller's argument line
+	blbs	r0,10$
+	ret
+10$:
+
+;;Debuggering call - echo command line
+;;pushaq buf
+;;calls #1,g^LIB$PUT_OUTPUT		;Just echo the line
+
+	clrl	retblk			;so we can test if retblk was returned
+	pushl	#3			;do set, don't signal, allow help
+	pushal	retblk
+	pushaq	buf
+	calls	#3,g^CD_PARSE		;Go for it!
+	blbs	r0,20$
+	tstl	retblk			;was retblk returned?
+	bneq	27$
+	ret				;return any errors to DCL
+20$:	cmpl	#CD_OUTPUTDONE,r0	;was just output done?
+	bneq	25$
+	ret				;just bail out
+25$:	cmpl	#CD_HELPDONE,r0		;was a helpdone?
+	bneq	27$
+	brw	200$
+27$:	moval	@retblk,r2		;get junk from retblk
+	moval	@CDPB_A_VECTOR(r2),r3	;get vector address
+	moval	@CDPB_A_SWITCHES(r2),r4	;point to CDPARSE returned flags
+.IF DF,DF_NOINHIBIT
+	bbc	#SW_V_INH,(r4),30$
+.IFF
+	bbs	#SW_V_NIN,(r4),30$
+.ENDC
+	blbc	4(r3),30$		;do NOT set messaging flags for errs
+	bisw	#1,2(r3)		;set just message text flag
+30$:
+
+;$PUTMSG has been replaced with a rewrite... putmsg was truncating
+;   messages at 255. This is unacceptable under conditions where it is
+;   normal for messages to exceed 255 because of embedded filenames!
+.IF DF,USE_SYSPUTMSG
+	$PUTMSG_S	-
+		msgvec	=	(r3)
+.IFF
+	clrl	-(SP)
+	clrl	-(SP)
+	clrl	-(SP)
+	pushl	r3
+	calls	#4,g^cd_putmsg
+.ENDC
+;
+
+	bisl3	#STS$M_INHIB_MSG,4(r3),r0	;return status silently
+	blbc	r0,35$
+	cmpl	#CD_DIRSET!STS$M_INHIB_MSG,r0	;was a dir set ok?
+	beql	40$			;jmp if so, else return what we got
+	cmpl	#CD_NOCHNG!STS$M_INHIB_MSG,r0	;was it a NOCHG?
+	beql	40$			;jmp if so, else return what we got
+35$:	ret
+40$:	bbs	#SW_V_COM,(r4),50$	;go DO if /COM switch spec'd
+	ret
+50$:	bbs	#SW_V_COMDF,(r4),60$	;Use different DO if /COM= used
+	pushaq	cmdstr
+	calls	#1,g^LIB$DO_COMMAND
+	ret
+60$:	movaq	@CDPB_A_COMFIL(r2),r3
+	incw	(r3)
+	decl	4(r3)
+	movb	#^a/@/,@4(r3)
+	pushaq	(r3)
+	calls	#1,g^LIB$DO_COMMAND
+	ret
+200$:	$trnlnm_s	-
+		tabnam	=	fildev,-
+		lognam	=	hlplnm,-
+		acmode	=	#PSL$C_SUPER
+	blbc	r0,220$
+210$:	pushaq	hlpcmd
+	calls	#1,g^LIB$DO_COMMAND
+	ret				;just bail out
+220$:	movab	hlpfab,r6
+	$open	fab=(r6)
+	blbs	r0,210$
+
+	pushl	#-1
+	clrl	-(SP)
+	pushl	#CD_VERSION
+	clrl	-(SP)
+	pushl	#CD_HELP3
+	clrl	-(SP)
+	pushl	#CD_HELP2
+	clrl	-(SP)
+	pushl	#CD_HELP1
+	pushl	fab$l_stv(r6)
+	pushl	fab$l_sts(r6)
+	clrl	-(SP)
+	movl	#CD_NOCDHELP,r0
+	pushl	r0
+	calls	#11,g^LIB$SIGNAL
+	bisl	#STS$M_INHIB_MSG,r0
+	ret
+
+	.end	cd

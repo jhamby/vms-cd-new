@@ -1,0 +1,469 @@
+;++
+; Original header:
+; Program:	CDPARSE.MAR V6.0A
+; Author:	TECSys Development, Inc.
+; Date:		97.01.28
+; Updated:	98.08.07, 98.10.19, 99.08.12
+;
+; License:
+;    Ownership of and rights to these programs is retained by the author(s).
+;    Limited license to use and distribute the software in this library is
+;    hereby granted under the following conditions:
+;      1. Any and all authorship, ownership, copyright or licensing
+;         information is preserved within any source copies at all times.
+;      2. Under absolutely *NO* circumstances may any of this code be used
+;         in any form for commercial profit without a written licensing
+;         agreement from the author(s).  This does not imply that such
+;         a written agreement could not be obtained.
+;      3. Except by written agreement under condition 2, source shall
+;         be freely provided with all executables.
+;      4. Library contents may be transferred or copied in any form so
+;         long as conditions 1, 2, and 3 are met.  Nominal charges may
+;         be assessed for media and transferral labor without such charges
+;         being considered 'commercial profit' thereby violating condition 2.
+;
+; Warranty:
+;    These programs are distributed in the hopes that they will be useful, but
+;    WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+;    or FITNESS FOR A PARTICULAR PURPOSE.
+;
+; This file now contains only the state table definitions from CDPARSE.MAR.
+; The action routines have been rewritten as C++ code in cdparse.c.
+; The state tables have been simplified and unimplemented features removed.
+
+	$tpadef			;LIB$TPARSE table generation junk
+
+	.psect	$tpastuff,pic,shr,noexe,rd,nowrt
+
+;++
+;  Local constants and macros
+;do_op() opcodes: these must match the enum values in cdparse.c.
+OP_C_BSL = 1  ;'\<eos>' processing
+OP_C_RST = 2  ;reset parser to top of string
+OP_C_DOL = 3  ;'$<eos>' processing
+OP_C_DD  = 4  ;'..' --> '-' processing
+OP_C_DEV = 5  ;devnam extraction
+OP_C_BRI = 6  ;'['..']' add w/insert
+OP_C_BRO = 7  ;'['..']' add w/overwrite
+OP_C_BDI = 8  ;'[.'..']' add w/insert
+OP_C_DOT = 9  ;change something at current token to '.'
+OP_C_DEL = 10 ;Deletes current char
+OP_C_RMV = 11 ;Deletes present parse position to beginning of line
+OP_C_BCK = 12 ;Back parser up one char
+OP_C_AT  = 13 ;code for username lookup
+OP_C_PND = 14 ;'#<eos>' processing
+OP_C_SCF = 15 ;Store Command File
+OP_C_NOD = 16 ;nodnam extraction
+OP_C_UPC = 17 ;Force accepted token uppercase & back up the parser
+OP_C_FID = 18 ;Cvt/UnCvt to/from FIDded specification
+OP_C_PAR = 19 ;Force use of parent DID for current dir
+
+; Switch values
+SW_V_LOG == 0
+SW_M_LOG == <1@SW_V_LOG>
+SW_V_VER == 1
+SW_M_VER == <1@SW_V_VER>
+SW_V_FUL == 2
+SW_M_FUL == <1@SW_V_FUL>
+SW_V_COM == 3
+SW_M_COM == <1@SW_V_COM>
+SW_V_INH == 4
+SW_M_INH == <1@SW_V_INH>
+SW_V_PART == 5
+SW_M_PART == <1@SW_V_PART>
+SW_V_AUTO == 6
+SW_M_AUTO == <1@SW_V_AUTO>
+SW_V_COMDF == 7
+SW_M_COMDF == <1@SW_V_COMDF>
+SW_V_HOME == 8
+SW_M_HOME == <1@SW_V_HOME>
+SW_V_CSH == 9
+SW_M_CSH == <1@SW_V_CSH>
+SW_V_PUSH == 10
+SW_M_PUSH == <1@SW_V_PUSH>
+SW_V_POP == 11
+SW_M_POP == <1@SW_V_POP>
+SW_V_VERSID == 12
+SW_M_VERSID == <1@SW_V_VERSID>
+SW_V_NIN == 13
+SW_M_NIN == <1@SW_V_NIN>
+SW_V_TRC == 14
+SW_M_TRC == <1@SW_V_TRC>
+
+; RETSTS primary values
+ST_C_BUG	= ^x8004	;Op failure... not used here (BUG)
+ST_C_NOOP	= ^x8009	;empty cmdlin (CD) NOOP ... switches set
+ST_C_SHOPRV	= ^x800d	;pound sign (CD #) EOP/mb~NFT (SWS ok)
+ST_C_HELP	= ^x8011	;Help operation EOP/mb~NFT (SWS ok)
+ST_C_SYNTAX	= ^x8014	;syntax... EOP
+ST_C_NOCHANGE	= ^x8018	;nochange (CD .)  NOOP / return if EOS
+ST_C_NEWDIR	= ^x801d	;new dir parsed (temp set new dir/ver)
+ST_C_DIRNEX	= ^x8020	;Op failure... dirnex
+ST_C_BUGCHECK	= ^x8024	;Internal consistency failure
+ST_C_BADCURDIR	= ^x8028	;Can't get/set current dir
+ST_C_HARDEX	= ^x802c	;Forced exit of CD process
+ST_C_SOFTEX	= ^x8031	;Soft exit of CD process (i.e. no message)
+
+	.psect	$tpastuff
+;++
+; TPA Parse table for command line main
+;--
+
+;	$INIT_STATE	state_table, key_table
+;	$STATE		[label]
+;	$TRAN		type[,label][,action][,mask][,msk-adr][,argument]
+;	$END_STATE
+;
+	$INIT_STATE	state_table_0, key_table_0
+
+; Modified from the original: argc/argv strips the first set of "" and
+; splits arguments by blank spaces, so we don't have to do any of that.
+
+; Process switches (w/abbreviation OK)
+	$STATE		start
+	$TRAN		!_isswitch,start
+	$TRAN		!_rmvsp,start
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_RMV
+
+; Single special processing
+	$STATE		single
+	$TRAN		TPA$_BLANK,TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		':',TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		'/',TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		!_iseos,TPA$_EXIT,,ST_C_NOOP,retsts
+	$TRAN		!_isdot,setddir		;substitute, reset & go
+	$TRAN		!_isddd,setddir		;substitute, reset & go
+	$TRAN		!_ispnd,TPA$_EXIT,,ST_C_SHOPRV,retsts
+	$TRAN		!_ispndn,TPA$_EXIT,,ST_C_SHOPRV,retsts
+	$TRAN		!_ispndx,TPA$_EXIT,,ST_C_SOFTEX,retsts
+	$TRAN		!_isqq,TPA$_EXIT,,ST_C_HELP,retsts
+	$TRAN		!_isque,TPA$_EXIT,,ST_C_HELP,retsts
+	$TRAN		!_isbsl,setddir		;substitute, reset & go
+	$TRAN		!_isdol,setddir		;substitute, reset & go
+	$TRAN		!_isat,setddir		;substitute, reset & go
+	$TRAN		'@',hardex		;pop any '@' escapees
+	$TRAN		<'~'>,hardex		;pop any '~' escapees
+	$TRAN		!_cleansl		;Clean out any leading '.\'
+	$TRAN		TPA$_LAMBDA		;continue testing
+
+; Personal ident testing
+	$STATE		prsid
+	$TRAN		!_isprsident,,is_personal_id	;check for personal IDENT
+	$TRAN		TPA$_LAMBDA		        ;continue testing
+
+; Logical testing
+	$STATE		tstlog
+	$TRAN		!_islogical,setddir,is_logical	;check for logical
+	$TRAN		TPA$_LAMBDA			;continue testing
+
+; String repair for all UNIX/MSDOS translations to VMS
+	$STATE		repair			;null state for reset & label
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_RST
+
+	$STATE		getnod			;extract device if present
+	$TRAN		!_caret_ANY,getnod
+	$TRAN		':'
+	$TRAN		TPA$_EOS,getdev,do_op,,,OP_C_RST	;all done
+	$TRAN		TPA$_ANY,getnod		;do all chars
+	$STATE					;Pick up second ':'
+	$TRAN		':',,do_op,,,OP_C_NOD	;found one!  Copy and chop.
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST	;all done
+	$TRAN		TPA$_ANY,getnod		;do all chars
+
+	$STATE		getdev			;extract device if present
+	$TRAN		!_caret_ANY,getdev
+	$TRAN		':',,do_op,,,OP_C_DEV	;found one!  Copy and chop.
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST	;all done
+	$TRAN		TPA$_ANY,getdev		;do all chars
+
+	$STATE					;force '\' to work right
+	$TRAN		!_isbsl,adjroot,do_op,,,OP_C_RST
+	$TRAN		TPA$_LAMBDA,adjroot
+
+	$STATE		forcerbreos		;force correct [] syntax
+	$TRAN		!_caret_ANY,forcerbreos
+	$TRAN		']'
+	$TRAN		TPA$_EOS,TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$TRAN		TPA$_ANY,forcerbreos
+	$STATE
+	$TRAN		TPA$_EOS,ddscan,do_op,,,OP_C_RST
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_SYNTAX,retsts
+
+	$STATE		adjroot			;adjust rooting chars
+	$TRAN		'[',forcerbreos		;brackets exist... fix rest
+	$TRAN		'\',adjroot,do_op,,,OP_C_BRO	;force brackets in
+	$TRAN		'.',,do_op,,,OP_C_BRI	;ok for '..' and '.' first
+	$TRAN		'-',,do_op,,,OP_C_BRI		;ok for '-'
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_BRI	;ok for <eos>
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_BDI	;force '[.'...']'
+
+	$STATE		ddscan			;change all '..' to '-'
+	$TRAN		!_isa_dd,ddscan		;fixes '..'
+	$TRAN		TPA$_EOS,,do_op,,,OP_C_RST
+	$TRAN		!_caret_ANY,ddscan
+	$TRAN		TPA$_ANY,ddscan
+
+	$STATE		bsscan
+	$TRAN		'\',,do_op,,,OP_C_DOT	;fixes '\' to '.'
+	$TRAN		TPA$_EOS,prsdev,do_op,,,OP_C_RST
+	$TRAN		!_caret_ANY,bsscan
+	$TRAN		TPA$_ANY,bsscan
+
+	$STATE		;States to edit 'xxxx\' (now 'xxxx.]')
+	$TRAN		']',,do_op,,,OP_C_BCK
+	$TRAN		TPA$_LAMBDA,bsscan
+	$STATE		;Backup to '.'
+	$TRAN		TPA$_LAMBDA,,do_op,,,OP_C_BCK
+	$STATE		;Delete the '.'		;;ODS5: wrong! maybe ok tho.
+	$TRAN		'.',,do_op,,,OP_C_DEL
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_SYNTAX,retsts
+	$STATE
+	$TRAN		']',bsscan
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_SYNTAX,retsts
+
+; ***!! Note: device name has been removed here...
+; Device recombination (no personal device parsing in this version)
+	$STATE		prsdev
+	$TRAN		!_fmt_node_dev	;Format node/device
+	$TRAN		TPA$_LAMBDA	;continue testing
+
+; Actual setddir attempt
+	$STATE		setddir
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_NEWDIR,retsts
+
+; Hardex exit state
+	$STATE		hardex
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT,,ST_C_HARDEX,retsts
+
+;++
+; Begin callable states
+;--
+;Skip a '^x' as a single character
+	$STATE		_caret_ANY
+	$TRAN		'^'
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE
+	$TRAN		TPA$_ANY,TPA$_EXIT
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+
+; Try to get switch values
+	$STATE		_isswitch
+	$TRAN		TPA$_BLANK,_isswitch
+	$TRAN		'/'
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE
+	$TRAN		TPA$_SYMBOL,,do_op,,,OP_C_UPC
+	$STATE
+	$TRAN		'AA',swautoans
+	$TRAN		'COM',swcom
+	$TRAN		'CSH',swcsh
+	$TRAN		'FULL',swful
+	$TRAN		'HOME',swhome
+	$TRAN		'INHIBIT',swinh
+	$TRAN		'LOG',swlog
+	$TRAN		'NOINHIBIT',swnin
+	$TRAN		'NOP',swnop	;required for '/' allowed processing
+	$TRAN		'PARTIAL',swpart
+	$TRAN		'POP',swpop
+	$TRAN		'PUSH',swpush
+	$TRAN		'TRACE',swtrc
+	$TRAN		'VERIFY_ONLY',swver
+
+	$STATE		swautoans
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_AUTO,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_AUTO,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_AUTO,switches
+
+	$STATE		swcom
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_COM,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_COM,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_COM,switches
+	$TRAN		'='
+	$STATE
+	$TRAN		TPA$_FILESPEC,,do_op,SW_M_COMDF,switches,OP_C_SCF
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_COM,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_COM,switches
+
+	$STATE		swcsh
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_CSH,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_CSH,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_CSH,switches
+
+	$STATE		swful
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_FUL!SW_M_LOG,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_FUL!SW_M_LOG,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_FUL!SW_M_LOG,switches
+
+	$STATE		swhome
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_HOME,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_HOME,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_HOME,switches
+
+	$STATE		swinh
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_INH,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_INH,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_INH,switches
+
+	$STATE		swtrc
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_TRC,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_TRC,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_TRC,switches
+
+	$STATE		swnin
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_NIN,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_NIN,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_NIN,switches
+
+	$STATE		swlog
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_LOG,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_LOG,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_LOG,switches
+
+	$STATE		swpart
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_PART,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_PART,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_PART,switches
+
+	$STATE		swpop
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_POP,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_POP,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_POP,switches
+
+	$STATE		swpush
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_PUSH,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_PUSH,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_PUSH,switches
+
+	$STATE		swver
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,SW_M_VER,switches,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,SW_M_VER,switches,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT,,SW_M_VER,switches
+
+	$STATE		swnop
+	$TRAN		TPA$_BLANK,TPA$_EXIT,do_op,,,OP_C_BCK
+	$TRAN		'/',TPA$_EXIT,do_op,,,OP_C_BCK
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+; Consume spaces at current token
+	$STATE		_rmvsp
+	$TRAN		TPA$_BLANK
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL
+	$STATE		_rmvsp0
+	$TRAN		TPA$_BLANK,_rmvsp0
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT
+
+; Clean up .\.\.\, .\\x (.\\x causes a weird error & this is the easiest fix!)
+	$STATE		_cleansl
+	$TRAN		'.'
+	$TRAN		TPA$_LAMBDA,TPA$_EXIT
+	$STATE
+	$TRAN		'\'
+	$STATE		__killsl
+	$TRAN		'\',__killsl
+	$TRAN		TPA$_LAMBDA,_cleansl,do_op,,,OP_C_RMV
+
+; Checking and repair of '..' to '-'
+	$STATE		_isa_dd
+	$TRAN		'.'
+	$STATE
+	$TRAN		'.',TPA$_EXIT,do_op,,,OP_C_DD
+
+; Format node/device & check for personal dev
+	$STATE		_fmt_node_dev	;Format node/device & personal
+	$TRAN		TPA$_ANY,TPA$_EXIT,fmt_node_dev
+
+; Personal ident format enforcement
+	$STATE		_isprsident		;check for personal IDENTs
+	$TRAN		TPA$_SYMBOL
+	$STATE
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+; Logical name checking
+	$STATE		_islogical		;check for LNM equiv
+	$TRAN		TPA$_ANY,_islogical
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+; Special character checking...
+	$STATE		_iseos		;check for '<eos>'
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_isdot		;check for '.[\]<eos>'
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_FID
+	$TRAN		'\'
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_isddd		;check for '...[\]<eos>'
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		'.'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_PAR
+
+	$STATE		_isque		;check for '?<eos>'
+	$TRAN		'?'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_isqq		;check for '??<eos>'
+	$TRAN		'?'
+	$STATE				;now require EOS
+	$TRAN		'?',,,SW_M_VERSID,switches
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_ispnd		;check for '#<eos>'
+	$TRAN		'#'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		_ispndn		;check for '#{n}<eos>'
+	$TRAN		'#'		;required for success
+	$STATE				;now require <n>EOS
+	$TRAN		TPA$_DIGIT	;allowable constant for dirchange
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_PND
+
+	$STATE		_ispndx		;check for '#*<eos>'
+	$TRAN		'#'		;required for success
+	$STATE				;now require <n>EOS
+	$TRAN		'*'		;do list operation
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_PND
+
+	$STATE		_isdol		;check for '$<eos>'
+	$TRAN		'$'		;required for success
+	$STATE				;now require EOS
+	$TRAN		TPA$_DIGIT	;allowable constant for dirchange
+	$TRAN		'*'		;do select operation
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_DOL
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_DOL
+
+	$STATE		_isbsl		;check for '\<eos>' or '/<eos>'
+	$TRAN		'\'		;required for success
+	$TRAN		'/'		;also support '/<eos>'
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_BSL
+
+	$STATE		_isat		;check for '[@|~]username<eos>'
+	$TRAN		'@'		;tran on leading @
+	$TRAN		<'~'>		;tran on leading ~
+	$STATE
+	$TRAN		TPA$_SYMBOL
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_AT
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL,,CD_IVIDENT,retstv
+	$STATE				;now require EOS
+	$TRAN		TPA$_EOS,TPA$_EXIT,do_op,,,OP_C_AT
+	$TRAN		TPA$_EOS,TPA$_FAIL
+	$TRAN		TPA$_LAMBDA,TPA$_FAIL,,CD_IVIDENT,retstv
+
+	$END_STATE
+;----------------------END STATE TABLE------------------------------------------
+	.end

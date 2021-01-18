@@ -1,0 +1,16 @@
+! Descriptive information
+NAME="CD V6.0C (c) 1999, TDI (C++ update)"
+IDENTIFICATION="CD V6.0C"
+
+! Main Object
+cd.obj
+
+! Sub-modules
+cd-parse.obj
+cd-parse-table.obj
+vms-file-ops.obj
+vms-quiet-setprv.obj
+vms-sys-command-io.obj
+
+! Message module
+cd-messages.obj

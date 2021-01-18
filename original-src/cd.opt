@@ -1,0 +1,13 @@
+! Descriptive information
+NAME="CD V6.0A ©1999, TDI"
+IDENTIFICATION="CD V6.0A/VAX"
+
+! Main Object
+sys$disk:[]cd.obj
+
+! Sub-modules
+sys$disk:[]cdparse.obj
+sys$disk:[]putmsg.obj
+
+! Message module
+sys$disk:[]cdmsg.obj

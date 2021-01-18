@@ -1,0 +1,346 @@
+	.title	PUTMSG - A 'putmsg' replacement w/o the 255 byte msg limit
+	.ident	'PUTMSG V1.0'
+	.library "sys$share:lib"
+;++
+;
+; Program:	PUTMSG.MAR V1.0
+; Author:	TECSys Development, Inc.
+; Date:		98.10.31
+; Updated:	never
+;
+; Abstract:
+;	This module is a home-brew replacement for the system $PUTMSG service.
+;	For the CD program, it is normal for messages issued to be larger
+;	than 255 bytes. The $PUTMSG service truncates messages to 255 bytes
+;	causing data loss in the output of the CD program.
+;
+;	Note that there _will_ be some behavior differences in this and
+;	the 'standard' $PUTMSG.... a number of assumptions and shortcuts
+;	were made in order to avoid linking against the system. Notably,
+;	this means that CD_PUTMSG does NOT properly send output to SYS$OUTPUT
+;	and SYS$ERROR as does $PUTMSG, but rather it simply uses
+;	LIB$PUT_OUTPUT.
+;
+; License:
+;    Ownership of and rights to these programs is retained by the author(s).
+;    Limited license to use and distribute the software in this library is
+;    hereby granted under the following conditions:
+;      1. Any and all authorship, ownership, copyright or licensing
+;         information is preserved within any source copies at all times.
+;      2. Under absolutely *NO* circumstances may any of this code be used
+;         in any form for commercial profit without a written licensing
+;         agreement from the author(s).  This does not imply that such
+;         a written agreement could not be obtained.
+;      3. Except by written agreement under condition 2, source shall
+;         be freely provided with all executables.
+;      4. Library contents may be transferred or copied in any form so
+;         long as conditions 1, 2, and 3 are met.  Nominal charges may
+;         be assessed for media and transferral labor without such charges
+;         being considered 'commercial profit' thereby violating condition 2.
+;
+; Warranty:
+;    These programs are distributed in the hopes that they will be useful, but
+;    WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+;    or FITNESS FOR A PARTICULAR PURPOSE.
+;--
+
+;
+;++
+;
+; Compatibility macros to make the Alpha macro compiler and the VAX
+; assembler co-exist happily, even on older versions of the VAX assembler.
+;
+;  Define ALPHA if R22 is a register and not a symbol
+.NTYPE	...IS_IT_ALPHA,R22		;Get the type of R22
+...IS_IT_ALPHA = <...IS_IT_ALPHA@-4&^XF>-5
+.IIF EQ,...IS_IT_ALPHA,	ALPHA=1
+
+.IF DF,ALPHA
+;
+; This is the ALPHA (previously called "EVAX") version of ARCH_DEFS.MAR,
+; which contains architectural definitions for compiling VMS sources
+; for VAX and ALPHA systems.
+;
+EVAX = 1
+BIGPAGE = 1
+ADDRESSBITS = 32
+;
+.IFF
+;
+; This is the VAX version of ARCH_DEFS.MAR, which contains
+; architectural definitions for compiling sources for
+; VAX systems.
+;
+VAX = 1
+VAXPAGE = 1
+ADDRESSBITS = 32
+
+.macro	.jsb_entry	input,output
+.endm	.jsb_entry
+.macro	.call_entry	nargs,label,preserve,output,home_args=TRUE
+.entry	label,	^m<preserve>
+.endm	.call_entry
+
+.ENDC
+;
+;--
+;
+
+	$rmsdef			;RMS return codes etc.
+	$ssdef			;System return codes
+	$stsdef			;Status structure
+
+
+	.psect	$local,pic,noshr,noexe,rd,wrt,long
+	.psect	$code,pic,shr,exe,rd,nowrt
+
+MAXMSG = 1024	;you MUST longword align this!
+
+;++
+;  Utility routine: get number of expected fao args for message code
+;
+;  GETMSGCNT rcode,&msgcnt
+;--
+.call_entry,	2,home_args=TRUE,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=getmsgcnt
+	subl	#256+16,SP
+	moval	(SP),r9			;r9 --> temp msg rtrvl buffr
+	clrl	-(SP)			;'temp' variable.... LBS=notFirstMsg
+	clrl	-(SP)			;spare storage for 'outadr's
+	moval	(SP),r7			;r7 --> current flags in effect
+	$getmsg_s -	;msgid,msglen,bufadr,flags,outadr
+		msgid =	4(AP),-
+		msglen = (r9),-
+		bufadr = (r9),-
+		flags = (r7),-
+		outadr = 4(r7)
+	clrl	r6			;assume noargs
+	blbc	r0,20$
+	extzv	#8,#8,4(r7),r6		;get num fao args expected to r6
+20$:	movl	r6,@8(AP)
+	ret
+
+
+;       CD_PUTMSG msgvec,[actrtn],[facnam],[actprm]
+;		actrtn = pv... arg1 = descrip of msg txt
+;			 success return => write msgtxt
+;       CD_PUTMSG msgvec
+.call_entry,	4,home_args=TRUE,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=cd_putmsg
+
+	subl	#MAXMSG+16,SP
+	moval	(SP),r10		;r10 --> temp output buffr
+	subl	#256+16,SP
+	moval	(SP),r9			;r9 --> temp msg rtrvl buffr
+	movl	4(AP),r11		;r11 = walking msg vect ptr
+	movl	(r11)+,r8		;collect num longwords avl & options
+
+	clrl	-(SP)			;'temp' variable.... LBS=notFirstMsg
+	clrl	-(SP)			;spare storage for 'outadr's
+	extzv	#16,#16,r8,-(SP)
+	moval	(SP),r7			;r7 --> current flags in effect
+	movzwl	r8,r8			;clear stuff out of top of r8
+
+10$:	bsbw	process_msg		;go dump a single message
+	blbs	r0,10$
+	cmpl	r0,#CD_EOMSGVEC		;is it a normal end of vector?
+	beql	20$
+	movzwl	#SS$_NORMAL,r0
+20$:	ret
+
+
+issue_msg:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bbc	#STS$V_INHIB_MSG,r1,10$
+	rsb				;ignore inhib'd msgs
+10$:	tstl	8(AP)
+	beql	20$
+	pushl	16(AP)
+	pushal	(r10)
+	calls	#2,@8(AP)
+	blbs	r0,20$
+20$:	pushal	(r10)
+	calls	#1,g^LIB$PUT_OUTPUT	;is this the right thing??
+	rsb
+
+getmsgerr:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	;check for SS$_MSGNOTFND sts here. text returned is a
+	;setup for %fac-s-NONAME, mes=xxxxxxxx, (fac=n, mess=n)
+	rsb
+
+
+reset_buffers:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	;restore output buffer descriptor
+	movl	#^x010e0000!MAXMSG,(r10)
+	moval	8(r10),4(r10)
+	;restore msgformat buffer descriptor
+	movl	#^x010e0100,(r9)
+	moval	8(r9),4(r9)
+	rsb
+
+process_msg:
+.jsb_entry	input=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>
+	bsbw	reset_buffers
+	movl	#CD_EOMSGERR,r0
+	cmpl	r8,#0
+	bgtr	20$
+	beql	10$
+	movl	#CD_EOMSGVEC,r0
+10$:	ret
+
+20$:	$getmsg_s -	;msgid,msglen,bufadr,flags,outadr
+		msgid =	(r11),-
+		msglen = (r9),-
+		bufadr = (r9),-
+		flags = (r7),-
+		outadr = 4(r7)
+	blbs	r0,30$
+	bsbw	getmsgerr
+	ret				;and bail out
+
+30$:	bbs	#STS$V_INHIB_MSG,(r11),40$
+	pushal	(r9)
+	pushal	8(r7)
+	calls	#2,w^fix_getmsg
+
+40$:	extzv	#8,#8,4(r7),r6		;get num fao args expected to r6
+	cmpzv	#STS$V_FAC_NO,#STS$S_FAC_NO,(r11),#SYSTEM$_FACILITY
+	bneq	50$
+	brw	do_sysmsg
+
+50$:	cmpzv	#STS$V_FAC_NO,#STS$S_FAC_NO,(r11),#RMS$_FACILITY
+	beql	do_rmsmsg
+	brw	do_usrmsg
+
+do_rmsmsg:	;format is [STS][STV] ... guaranteed!
+	;chkargs 2
+	bbs	#RMS$V_STVSTATUS,(r11),10$
+
+	;message marked noSTV... therefore, pass STV as fao arg
+	$fao_s -
+		ctrstr = (r9),-
+		outlen = (r10),-
+		outbuf = (r10),-
+		p1 = (r11),-
+		p2 = 4(r11)
+	movl	(r11),r1		;pass MSGID in r1
+	brb	30$			;join common output code
+
+10$:	;message was marked STV.... need to dump out 1st getmsg, then redo
+	movl	(r9),(r10)
+	movl	4(r9),4(r10)		;Slam the r10 descriptor
+	movl	(r11),r1		;pass MSGID in r1
+	bsbw	issue_msg		;go generate the user output
+	bsbw	reset_buffers
+	;Now, go get the stv xlt
+	$getmsg_s -	;msgid,msglen,bufadr,flags,outadr
+		msgid =	4(r11),-
+		msglen = (r10),-
+		bufadr = (r10),-	;PUT THIS DIRECTLY TO OUTPUT BUFFER
+		flags = (r7),-
+		outadr = 4(r7)
+	movl	4(r11),r1		;pass MSGID in r1
+	blbs	r0,20$
+	bsbw	getmsgerr
+	ret				;and bail out
+20$:	bbs	#STS$V_INHIB_MSG,(r11),30$
+	pushal	(r10)
+	pushal	8(r7)
+	calls	#2,w^fix_getmsg
+
+30$:	bsbw	issue_msg
+	addl	#8,r11			;jump the [STS][STV] block
+	subl	#2,r8			;remove from vectorsize
+	movzwl	#SS$_NORMAL,r0
+	rsb				;RMS message done
+
+do_sysmsg:	;format is [STS]{fao arguments}
+	movl	SP,r5			;save stack
+	moval	@#4[r6],r2		;change count into (n+1)*4
+	subl	r2,SP			;make space for $FAOL vector
+	movl	r6,(SP)			;stuff in the arg count
+	subl	#4,r2			;compute sizeof(just_fao_args)
+	pushl	r5
+	movc3	r2,4(r11),8(SP)		;move arguments
+	popl	r5
+	moval	(SP),r2			;point at array
+	$faol_s -			;do the format
+		ctrstr = (r9),-
+		outlen = (r10),-
+		outbuf = (r10),-
+		prmlst = 4(r2)
+	movl	(r11),r1		;pass MSGID in r1
+	bsbw	issue_msg
+	moval	@#4[r6],r2		;change count into (n+1)*4
+	addl	r2,r11			;jump the [STS][STV] block
+	decl	r8			;remove [STS] from vectorsize
+	subl	r6,r8			;remove {[FAO-args]} from vectorsize
+	movzwl	#SS$_NORMAL,r0
+	movl	r5,SP			;reset the stack
+	rsb				;RMS message done
+
+do_usrmsg:	;format is [STS][opts|Nfaos][fao arguments]
+	movl	SP,r5			;save stack
+	moval	@#4[r6],r2		;change count into (n+1)*4
+	subl	r2,SP			;make space for $FAOL vector
+	subl	#4,r2			;remove count longword from vec len
+	movl	r6,(SP)			;stuff in the arg count
+	;Now figure out what we got sent
+	movzwl	4(r11),r0		;nargs we were sent
+	moval	@#0[r0],r1		;change count into n*4
+	pushl	r5
+	movc5	r2,8(r11),#0,r1,8(SP)	;move arguments
+	popl	r5
+	moval	(SP),r2			;point at array
+	$faol_s -			;do the format
+		ctrstr = (r9),-
+		outlen = (r10),-
+		outbuf = (r10),-
+		prmlst = 4(r2)
+	movl	(r11),r1		;pass MSGID in r1
+	bsbw	issue_msg
+	movzwl	4(r11),r0		;nargs we were sent
+	moval	@#8[r0],r2		;change count into (n+2)*4
+	addl	r2,r11			;jump the [STS][nargs]{[faoargs]} block
+	decl	r8			;remove [STS] from vectorsize
+	decl	r8			;remove [nargs] from vectorsize
+	subl	r0,r8			;remove {[FAO-args]} from vectorsize
+	movzwl	#SS$_NORMAL,r0
+	movl	r5,SP			;reset the stack
+	rsb				;RMS message done
+
+;	fix_getmsg	fixFLAGADR,hackupBUFFER
+.call_entry,	2,home_args=TRUE,-
+		preserve=<r2,r3,r4,r5,r6,r7,r8,r9,r10,r11>,-
+		output=<r0,r1>,-
+		label=fix_getmsg
+	movl	8(AP),r0		;point at output descriptor
+	cmpb	@4(r0),#^a/a/		;Force msgs upcase 1st ltr if needed
+	blssu	10$
+	cmpb	@4(r0),#^a/z/
+	bgtru	10$
+	xorb	#^a/ /,@4(r0)
+10$:	movl	4(AP),r0		;address of fixupflags
+	blbs	(r0),20$		;go do hack if appropriate
+	bisl	#1,(r0)
+	ret
+20$:	movl	8(AP),r0		;point at output descriptor
+	tstw	(r0)			;see that there is text there
+	bneq	30$
+	ret
+30$:	cmpb	@4(r0),#^a/%/		;see if it's a '%' to hack
+	bneq	40$			;leave it alone
+	movb	#^a/-/,@4(r0)		;and hack up the leading '%' to a '-'
+40$:	ret
+
+	.end

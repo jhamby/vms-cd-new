@@ -1,0 +1,617 @@
+1 CD
+Version 6.0A, ©1999, TECSys Development, Inc.
+
+VMS provides a command, SET DEFAULT, to facilitate the changing of the
+user's default directory.  SET DEFAULT provides only a minimum
+functionality where there is opportunity for a great deal of time saving
+automation.
+
+This CD utililty, now at version 6.0A, provides SET DEFAULT capabilities,
+plus a large array of built-in and user-customizable capabilities.  This
+guide covers most of CD's features & how to use them.
+2 Preliminaries
+This is the readme file for the OpenVMS CD utility, now at Version 6.0.
+
+If you have any comments or questions, by all means, please send them by
+email to cdutil@tditx.com.  Also, there is a web page for this utility at
+http://www.tditx.com/~cdutil/index.html.
+3 Building_CD_&_Getting_Started
+For your own peace of mind, you should consider rebuilding the included
+objects and/or exe's from source.  That can be done by using:
+    $ @BLDCD                 !Build all objects & link images
+on a VAX and on an Alpha.  If you are on the alpha, you will probably want
+to rename the cd.alpha_exe file to a cd.exe in an appropriate place.
+Rebuilding the alpha version requires that you have MACRO/MIGRATE
+installed.
+
+If you wish only to relink, you must have object modules in the same directory
+as the LNKCD command procedure, and the options file. If you have not
+previously built or copied the CD object files, you will need to do that
+prior to attempting a relink. That can be done by using the following:
+    $ COPY [.V62]*.*OBJ []   !Gets a copy of the supplied object modules
+    $ @LNKCD                 !Relinks the images
+
+If you have MMS or MMK, there is a DESCRIP.MMS file provided from which
+to rebuild.
+
+Installation is by using a DCL foreign command definition...  Try starting
+with these:
+
+    $ cd:==$dev:[dir1.dir2]cd/inhib            !Optional: add /log
+    $ sd:==$dev:[dir1.dir2]cd/inhib/aa/partial !Optional: add /log
+
+New as of version 5.5 was the requirement to build the CDHELP.HLB help
+library and to either install it into SYS$HELP, or define the logical
+name CDHELP to point to the constructed help library. Failure to do
+this will render the command 'CD ?' inoperative.
+
+The helpfile can be created directly into SYS$HELP by using this command:
+  $ library/create/help sys$help:cdhelp cdhelp.hlp
+or it can be constructed in a local directory using:
+  $ library/create/help cdhelp.hlb cdhelp.hlp
+In the latter case, the logical name CDHELP _MUST_ be defined to point to
+wherever the CDHELP.HLB was built to.
+
+Earlier versions of CD have been shown to operate all the way from VAX/VMS
+V5.1 forward, and from AXP/VMS V1.5 forward.  There is no known reason why
+this should not still be true, however it is not been empirically proven
+since about version 5.0 of CD.
+2 License_&_Disclaimer
+WARRANTY:
+
+  These programs are distributed in the hopes that they will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+LICENSE:
+
+  Ownership of and rights to these programs is retained by the author(s).
+  Limited license to use and distribute the software in this library is
+  hereby granted under the following conditions:
+    1. Any and all authorship, ownership, copyright or licensing
+       information is preserved within any source copies at all times.
+    2. Under absolutely *NO* circumstances may any of this code be used
+       in any form for commercial profit without a written licensing
+       agreement from the author(s).  This does not imply that such
+       a written agreement could not be obtained.
+    3. Except by written agreement under condition 2, source shall
+       be freely provided with all executables.
+    4. Library contents may be transferred or copied in any form so
+       long as conditions 1, 2, and 3 are met.  Nominal charges may
+       be assessed for media and transferral labor without such charges
+       being considered 'commercial profit' thereby violating condition 2.
+
+Throughout this document, unless prefixed otherwise, CD will refer to the
+CD version 6.0 for OpenVMS.
+2 Usage_Summary
+Following is a brief list of the functions provided by CD.
+
+The basic CD functions:
+  CD             Prints current default directory
+  CD dirname     Changes to a subdirectory from the current directory
+  CD \dirname    Changes to a directory from the root on current device
+  CD ..          Changes to a directory one level above current directory
+  CD ..\dirname  Changes to an 'adjacent' directory
+  CD .           Politely tells you your current directory did not change
+                 (With ODS-5 support, this DIDs or UNDIDs a directory)
+
+General extensions:
+  CD ?                  - Activate online help (CDHELP logical)
+  CD ??                 - Print CD version information
+  CD #                  - give previous dir
+  CD $                  - change to prev dir
+  CD dev:\dirname       - change to named device, dir named
+  CD logical_w_dir[:]   - move to spec'd directory
+  CD .dirname           - change to subdir named
+
+  CD IDN                - move to 'CDI_IDN' contents
+  CD FM$:[txt[.txt..]]  - move to 'CDF_FM$' contents $FAO formatted w/txt
+  CD @usrname|~usrname  - move to user's home dir [possibly privileged]
+  Switches: (must be specified *BEFORE* pathname)
+    /AA                 - AutoAnswer search queries
+    /COM[=fspec[CD.COM]]- Execute command file on directory change
+    /CSH                - Enable c-shell history bahavior
+    /INHIBIT            - Inhibit facility, ident, severity in messages
+    /FULL               - Verbose messages
+    /HOME               - Causes plain CD command to CD SYS$LOGIN:
+    /NOP                - Placeholder switch for enabling '/' separator
+    /LOG                - Log changes in directory
+    /PARTIAL            - Enable partial directory searching
+    /POP                - Used with /CSH to create a 'popd' function
+    /PUSH               - Used with /CSH to create a 'pushd' function
+    /TRACE              - Trace contents of $SETDDIR buffer
+    /VERIFY             - Verify target dir... don't set def
+  CD path1 path2        - Goto 'path1' then 'path2' from there
+                          Note: special operations like '#', '?' cannot be
+                                mixed in with this type operation
+  CD #n                 - List a previous directory
+  CD #*                 - List all known previous directories
+  CD $n                 - Goto previous directory #n
+  CD $*                 - List all known previous directories & select
+  CD *                  - Goto a wildcard subdirectory
+  CD P *                - Goto Personal Ident P, then wildcard subdir
+  CD{switch} dir1/dir2  - '/' path separator after switches are seen
+                          (use /NOP if you do not use any other switches)
+  Logicals:
+    LAST_DEFAULT_DIRECTORY - Always the last exited directory
+    CD$n                   - n = {0..9} list of most recently used
+                             previous directories... note: this is *not*
+                             necessarily in a readily predictable order
+    CDHELP                 - CDHELP should point to the CD help library
+                             (optionally, put CDHELP.HLB into SYS$HELP:)
+
+EFS/ODS-5 extensions:
+  CD .                  - DID/unDID current directory if possible
+  CD ...                - Change dir UP one level using DIDs
+                          (This bypasses RMS restrictions on [-] and ..)
+2 Known_Bugs_Limitations_Features
+*  CD does NOT support:
+
+    o  CD's to non-existent directories - Sorry...  it's designed
+       that way!
+
+*  Discrepancies sometimes exist with the output of CD showing
+   the default directory and the default output of the DIRECTORY
+   command. DIRECTORY will by default DID its output before CD
+   will. This behavior can be eliminated using the /STYLE=EXPANDED
+   switch on the directory command.
+
+*  CD to NODE:: cannot accurately test for nonexistent target
+   directories because it appears that SYS$PARSE does not accurately
+   return that information...  i.e.  it lies about the directory being
+   OK when it isn't.
+
+*  CD has had intermittent and as yet, untraceable difficulties with:
+
+    o  Occasional 'Specified directory does not exist' errors when
+       the target darn well does exist.  Workaround:  repeat the CD
+       command again.  This has only been seen on AXP VMS 1.5 so
+       far...
+2 Version_6.0_New_Features
+  * CD version 6 supports the new EFS/ODS-5 paradigms of extended
+    filenames, and case preservation. To avail yourself of these
+    features, it is a prerequisite to build CD under VMS V7.2 or
+    later. Prior versions of VMS do not support EFS/ODS-5. Refer
+    to the EFS documentation for the DCL syntax and commands used
+    to support extended filenames. Also note that as of this
+    writing, the VAX support for EFS/ODS-5 is not sufficient to
+    support ODS-5 filesystem navigation. CD on VAX does not
+    support EFS/ODS-5.
+
+  * Two new commands were added to assist in using ODS-5
+    capabilities:
+
+      o 'CD .' is used to DID/unDID the current directory.
+        If the current DIDded directory specification can
+        fit in 255 characters (a limit imposed by the
+        $SETDDIR system service), then this function can
+        turn a DIDded directory specification back into
+        it's normal textual representation.
+
+      o 'CD ...' is used to forcibly go upwards one
+        directory level using directory backlink FIDs.
+        This is convenient if the current directory is
+        DIDded because the semantic '[-]' does not work
+        from a DIDded directory specification.
+
+  * A new switch /TRACE has been added to dump the contents of
+    the buffer containing the intended target directory
+    specification just prior to attempting to use it.
+2 Recent_Bugfixes_And_Changes
+
+*  EFS/ODS5 filesystem support has been added.
+
+*  A number of searchlisted logicals problems were resolved
+
+*  Failures returned from CD_PARSE were not being signalled
+   properly. This resulted in bogus error messages being
+   issued in rare cases (prior to ods-5 support they were
+   rare... :) Additionally, the /INHIBIT and /NOINHIBIT
+   settings had to be overridden for errors.
+
+*  Commands of the form 'cd @username.something' were
+   previously dropping the intervening '.' resulting in
+   unexpected behavior.
+
+*  Added a /TRACE switch to display the CD target directory buffer
+   just prior to trying to use SYS$SETDDIR to set the target
+   directory.
+3 V6.0A
+
+Bugs fixed
+
+*  Fixed use of READALL privilege - it was erroneously not enabled
+   during $parse operations in CD.  This resulted in a failure to
+   change directory on some occasions.  IIRC, the error was a 'no such
+   directory'.
+
+*  Repaired a hang in ods-5 specific /PARtial processing.
+
+*  Removed a hardlimit of 79 characters that was wrong, however, no
+   known bug was ocurring because of this.
+
+*  The command 'CD X11' used to accvio - the problem was with
+   overlapping logical name translation buffers.  Buffers were
+   de-overlapped; CD now happy again.
+
+*  A command of the form 'CD ~USER/LOGICAL' used to change directory to
+   the translation of LOGICAL -- This is now forced to be the subdir
+   'LOGICAL' off from ~user as one would expect.
+
+*  When CD exited a non-existent directory, it was issuing a strange
+   appearing error message.  This has been fixed, but it remains to be
+   seen if there are unwanted side-effects from this under some unusual
+   circumstances. This is also NOT a usual state of affairs unless
+   one either deletes the current directory or mixes SET DEF and CD.
+
+
+Enhancements
+
+*  Prior to 6.0A, if a CD command resulted in a 'NOCHANGE' (meaning
+   that the directory changed to was the same as the current
+   directory), the associated CD command procedure would not be
+   executed.  V6.0A now executes CD.COM (or command) under these
+   conditions -- I.e.
+      CD ~  --> exec's the /COMMAND, followed by
+      CD ~  --> exec's the /COMMAND again
+
+*  The CD-?-UNEXPERR message was confusing...  it is now suppressed,
+   and instead, the associated error message is now issued directly
+   without the UNEXPERR prefix.
+
+*  A DEBUG build target was added to the DESCRIP.MMS.
+2 Command_Syntax
+The CD command line is of the form:
+
+    CD [switches] {directories-or-special-characters}
+
+In the directories-or-special-characters, the symbols '.', and '\' are
+fully supported directory separators.  A directory separator under VMS is
+usually the '.', of course.  Also, with the advent of a lot of webserver
+software and an increasing need for many VMS users to work under UN*X or
+vice-versa, use of the '/' as a separator became a necessity.  It came at
+a cost though.  Since the [switches] section uses the '/' as a qualifier
+introducer per standard DCL usage, there had to be a way to determine that
+the switches were over and the directories-or-special- characters had
+begun.  This was done by allowing exactly one grouping of switches.  After
+an intervening space, the '/' becomes a directory separator and not a
+qualifier introducer anymore.
+
+There are two significant ramifications of this:
+
+  1.  If you define:  CD:==$CD/INH, then you cannot subsequently use CD
+      /PAR/AA because that enters the CD program as:
+               CD /INH /PAR/AA
+      Since this construct was more-or-less broken anyway in most previous
+      releases of CD (including 5.1), it was considered an acceptable
+      sacrifice.  If you want to use two different switch configurations,
+      using two different symbols is the recommended approach.
+
+  2.  If you intend to use the '/' as a separator, then it becomes
+      mandatory to have at least 1 switch.  Therefore, the /NOP switch was
+      added with 5.2 in case you do not normally use any switches with CD,
+      but you do wish to use the '/' as a separator.
+3 Switches
+    /AA                 - AutoAnswer search queries
+    /COM[=fspec[CD.COM]]- Execute command file on directory change
+    /CSH                - Enable c-shell history bahavior
+    /INHIBIT            - Inhibit facility, ident, severity in messages
+    /FULL               - Verbose messages
+    /HOME               - Causes plain CD command to CD SYS$LOGIN:
+    /NOP                - Placeholder switch for enabling '/' separator
+    /LOG                - Log changes in directory
+    /PARTIAL            - Enable partial directory searching
+    /POP                - Used with /CSH to create a 'popd' function
+    /PUSH               - Used with /CSH to create a 'pushd' function
+    /TRACE              - Trace contents of $SETDDIR buffer
+    /VERIFY             - Verify target dir... don't set def
+    /CSH                - Enable c-shell minimal features emulation:
+        /CSH/HOME         - Cause 'plain' CD command to go to SYS$LOGIN:
+        /CSH/PUSH         - Simulate c-shell pushd operation
+        /CSH/POP          - Simulate c-shell popd operation
+2 How_It_Works
+This section describes the operation of the CD utility.  If you use a fair
+number of CD's features, you will encounter conflicts that this section
+explains how to resolve, and it should be helpful in general to read
+through CD's general principles of operation.
+3 Search_Order
+CD examines your command string for switches first, and then for any "path
+segments".  A path segment is a CD directory specification, or a CD
+"special command".  The reason for more than one segment is that when the
+2nd segment and following specify directories relative to the first
+segment, a fairly complex directory change can be built systematically and
+easily from 2 or 3 CD path segments.
+
+Each path segment is processed against a list of criteria, and when such a
+criteria is met, substitution occurs, the directory change is attempted
+directly with the result of the substitution.  The criteria are [in
+order]:
+
+   *  Special commands & symbols, including the help request '?', the
+      print-previous-dir request '#', and the show-current-dir request
+      [nothing].  These are handled directly & no more processing is
+      performed on the CD command string.  Also in this category are the
+      symbols:  '$', '$*', '$<n>', @<username> (or ~<username>), '\', and
+      '.'.  The '$...' symbols deal with previously visited directories,
+      the '@' or '~' goes to user's login directories, the '\' is a "root
+      level" i.e.  [000000], and the '.' is the current directory.
+
+      For ODS-5 systems, included in these special symbols are an
+      extended functionality for the '_.' character, and the '...'
+      special symbol. The '.' character will DID/unDID a directory if
+      possible, and the '...' symbol will forcibly move upwards in
+      the directory structure using the backlink recorded in the file
+      header.
+
+   *  The current path segment will be converted as a personal identifier
+      if the appropriate CDI_xxx symbol exists & provided ':' and '.'
+      symbols do not appear in the path segment.
+
+   *  The current path segment will next be translated as a logical name,
+      and if there is a corresponding logical, its translation is used.
+      Use a leading '.' on directory names that conflict with logicals to
+      force usage as a directory instead of a logical.
+
+   *  The current path segment is next checked for a 'device'
+      specification, and if one is found, it is tested to see if it is a
+      personal device symbol by looking for the appropriate CDF_xxx
+      symbol. There is no easy way to resolve conflicts between personal
+      device names and real device names.  The only solution is not to
+      overmap real device names with personal device symbols.  Personal
+      device formatting is discussed a little later.
+
+         o  The personal device formatting string is checked for syntactic
+            construction indicating an API activation request, and if the
+            correct syntax is seen, an API load is requested, and all
+            corresponding text is dumped off to the API to translate as it
+            sees fit.
+
+   *  The current path segment is then translated to convert all '..' and
+      '\' notations to VMS-useable directory specifications.
+
+   *  Any path segment that made it this far gets used directly.  If no
+      relational path specifiers have been used, such as a leading \, or
+      [] notations, or a leading '.', then a leading '.' is assumed to
+      default the path segment xyzzy to [.xyzzy].
+
+   *  If the /PARTIAL switch was specified, then the last text portion of
+      the segment [before $FAO if appropriate] gets '*' characters stuffed
+      into it before use...  for example:  'cd/PARTIAL xyzzy' equates to
+      'cd x*y*z*z*y*' - used in combination with the /AA (auto-answer)
+      switch, this provides a powerful shortcutting approach to directory
+      specification.  Hint:  If you do not generally want /AA/PARTIAL,
+      then define two symbols.  For example:  cd & sd...  cd is straight
+      cd, sd includes the /AA/PARTIAL.
+3 Special_Symbols
+o  The '$' symbol refers to the last directory exited by a CD command.
+   The corresponding logical name is CD$0.  $0 is equivalent to $.  The
+   CD$0 logical name is redefined for each & every directory exit.
+   (Note that as of version 5.5, there are some exceptions to this with
+   respect to the /PUSH and /POP switches - see below).
+
+o  The '#' symbol prints the translation of CD$0 ...  i.e.  it prints
+   the location that a CD $ would move you to.
+
+o  The '#n' sequence prints the translation of CD$n ...  i.e.  it
+   prints the location that a CD $n would move you to.
+
+o  The '*' indicates a wildcard wherever it is seen.  It is valid in
+   most places it would be valid for a VMS DIRECTORY command.  CD will
+   process wildcards by presenting each matching directory and allowing
+   you to respond Y/N/Q for yes, no, or quit.  ^Z is accepted as QUIT.
+   The /AA (auto-answer) switch causes CD to assume a 'Y' answer to any
+   match.
+
+o  Use '#*' to request a list of the last 10 known previous
+   directories.
+
+o  Use '$*' to request & select from a list of the last 10 known
+   previous directories.  ^Z is accepted as QUIT.
+
+o  From the list obtained by '#*', you can CD to a particular numbered
+   directory [say 4], using the symbol '$4'.  Note also that the
+   logical name CD$4 points to that directory as well.
+
+   PLEASE NOTE:  the directory list maintained by CD is sorted into a
+   most-recently-exited order.  This makes frequently-exited
+   directories tend to stay in the list, but at the price of the list
+   not necessarily being in a predictable order at any given time.
+   (Also as of version 5.5, there are some exceptions to this with
+   respect to the /PUSH and /POP switches - see below).
+3 Personal_Idents
+A personal ident is a string of characters that is usually a mnemonic for
+some frequent directory destination.  The symbol CDI_R MUST exist for a
+personal ident R to work.  The translation of that symbol should be the
+desired target directory...  e.g.  $ CDI_R:==SYS$LOGIN:  If you have a
+subdirectory [.R], use the notation CD .R to bypass the personal ident
+translation.
+3 Personal_Devices
+If you are familiar with the F$FAO lexical, or the SYS$FAO system service,
+please skip to the next paragraph.  Otherwise, type the following commands
+at the DCL prompt:
+    $ write sys$output f$fao("1: !3(AS)","TOP",".D1",".D2")
+    $ write sys$output f$fao("2: !AS!+!AS!2(-)!AS","TOP",".D1",".D2")
+This demonstrates the use of the FORMATTED ASCII OUTPUT (FAO) lexical
+function in DCL.  In example 1, 3 ASCII STRINGS [!3(AS)] are processed
+from the argument list in consecutive order.  to produce the output
+string.  In example 2, the same three strings are processed, but the !+
+and !2(-) directives are used to force FAO to use the argument list in a
+different order from what was supplied.  The first argument is called the
+control string since it controls the processing of subsequent arguments.
+
+Personal devices are syntactically identical to a VMS device and file
+specification of the form MYDEV$:TEST.D1.D2.  CD looks for a symbol of the
+form CDF_MYDEV$ which contains a $FAO control string as its translation.
+The "filename" portion of the specification is chopped into "TEST", ".D1",
+".D2", and appended with 13 ""'s to provide a total of 16 formattable
+segments.
+3 The_Personal_Device_API
+A personal device symbol having a translation of the form:
+    "@[[image][+symbol]=]fao-text"
+invokes the API activation mechanism.
+
+The default image name is CD_USER, and default symbol is CD_PROCESS.  The
+image is activated using LIB$FIND_IMAGE_SYMBOL, and the user entrypoint
+symbol is called using:
+    sts=call_user(fao-text.r.dsc,devnam.r.dsc,buffer.w.dsc,retlen.w.w)
+where:
+    fao-text.r.dsc
+      type:           text string
+      access:         read only
+      mechanism:      descriptor
+
+      FAO-formatted result from combining the user data portion from the
+      API-defined symbol (called 'fao-text' in the prototype listed
+      above) with whatever the user specified after the personal device
+      according to the above-described processing for FAO arguments.
+
+    devnam.r.dsc
+      type:           text string
+      access:         read only
+      mechanism:      descriptor
+
+      Personal device name used to activate the image.
+
+    buffer.w.dsc
+      type:           text string
+      access:         read/write
+      mechanism:      descriptor
+
+      Resulting target directory specification from processing the fao-
+      result-text and devnam arguments.
+
+    retlen.w.w
+      type:           word integer
+      access:         write
+      mechanism:      reference
+      Resulting length of the returned buffer.
+
+Return status is a VMS condition value.  If an error is returned, the CD
+parse will fail and issue the corresponding error message.
+
+A sample CD_USER program is distributed with the CD source distribution.
+This sample program duplicates the '~/@' feature of CD itself, but it
+should serve as an example of how the API works.
+2 Features_For_UN*X_Users
+CD for VMS maintains a directory history list using a completely different
+paradigm from the UN*X c-shell cd/pushd/popd model.  CD's goal with its
+directory history list is to:
+
+  1.  Automatically maintain the history list for you.
+
+  2.  Maintain the most-frequently-exited directories in the list by
+      sorting the list contents during insertion of a 'previous'
+      directory.
+
+These goals are what lead to the basically 'unpredictable' ordering of the
+directory list.
+
+Because 1) these differences are enough to be annoying to those of you
+used to the pushd/popd directory model, and 2) the amount of effort to
+implement these features was relatively minor, CD now can be told to
+operate in a push/pop manner.
+
+Use the following definitions for CD, PUSHD, and POPD:
+    CD :== $DEV:[DIR]CD/INH/CSH/HOME          (1)
+    PUSHD :== $DEV:[DIR]CD/INH/CSH/PUSH       (2)
+    POPD :== $DEV:[DIR]CD/INH/CSH/POP         (3)
+
+Definition 1 is your primary CD command.  It is defined to /INHibit the
+output of message facility, severity, and ident components of any CD
+messages, and to treat the CD command with no parameters as a 'cd $(HOME)'
+command per UN*X.  The '/CSH' instructs CD to *NOT* maintain an automated
+history list.
+
+Definition 2 is a PUSH directory command.  Usage is 'PUSH target' where
+the *current* directory is pushed, and the jump is made to the target
+directory.  The combination of '/CSH/PUSH' instructs CD to behave this
+way.
+
+Definition 3 is a POP directory command.  Usage is 'POP [$[n]]' where the
+optional parameter specifies which CD history list to jump to _AND_ to
+remove from the history list.  The combination of '/CSH/POP' instructs CD
+to behave this way.
+
+NOTE:  These features were added to provice _basically_ _similar_
+functionality for our UN*X users out there.  The hope is that the
+similarity level is high enough that the features are useful, however, it
+was _NOT_ the design goal of these additions to precisely duplicate UN*X
+pushd and popd behavior.  Sorry.
+2 Notes
+Notes on miscellaneous subjects about CD.
+3 Regarding_@username/~username_And_READALL
+Since this functionality requires read access to the SYSUAF.  Either you
+must be sufficiently privileged to access the SYSUAF yourself, or your
+system manager must have installed CD with READALL privilege.  (System
+managers:  READALL privilege is the ONLY privilege that CD knows how to
+enable and disable.  You should NOT install version 6.0 with any other
+privileges.)
+
+The ~ functionality now much more closely resembles UN*X.  The following
+are valid:
+     ~, ~/    - Your current login directory from the SYSUAF
+     ~/dir    - A subdirectory from your SYSUAF login directory
+     ~user/www        - www subdirectory from <user>'s login directory
+
+CD differentiates between the SYSUAF login directory from SYS$LOGIN
+because a user is free to redefine SYS$LOGIN.  The ~ and @ (which are
+identical in function) use the SYSUAF and ignore the current SYS$LOGIN.
+3 On_Using_'/COM':_Automatic_Command_Execution
+If you use the '/COM' switch, then upon successful transition to a new
+directory, CD will automatically execute the DCL command:
+    $ IF F$SEARCH("CD.COM").NES."" THEN @CD
+If you need, this command can be changed by editing CD.MAR and changing
+the contents of the line at the label 'cmdstr:' and rebuilding CD.  For
+those of you that are not assembler programmers, please note that the '/'
+symbols enclosing the command definition cannot be used inside the actual
+command...  if you need to use a '/' in your command, the change the
+existing '/' characters to something else (e.g.  '~' or '`') before you
+insert your command containing a '/'.
+
+Starting with V5.2 is support for a '/COM=filename' construct.  CD will
+simply perform an @filename upon a successful directory transition.  This
+modification eliminates most needs to edit the default command to be
+executed.
+3 INSTALLing_CD:Note_to_System_Managers
+CD (as of version 5.2), has been designed to be installed with
+READALL if you so choose.  The purpose of READALL is to allow
+non-privileged users to use the ~username (or @username) functions.  It is
+disabled except when retrieving the home directory of a user from the
+system UAF.  Note also that there are some small performance gains
+achieved by installing CD as /open /header/share even if you do not wish
+to give it READALL.
+3 The_CD_Help_Library
+This version of CD removes the CD-internal help accessed using the 'CD ?'
+command, and replaces it with a CD help library called CDHELP. This help
+library MUST be accessible in SYS$HELP:CDHELP.HLB, or a logical name
+CDHELP MUST be defined to point to the CDHELP.HLB file wherever it is.
+Failure to perform these steps will result in the CD help command being
+inoperative.
+
+The helpfile can be created directly into SYS$HELP by using this command:
+  $ library/create/help sys$help:cdhelp cdhelp.hlp
+or it can be constructed in a local directory using:
+  $ library/create/help cdhelp.hlb cdhelp.hlp
+In the latter case, the logical name CDHELP _MUST_ be defined to point to
+wherever the CDHELP.HLB was built to.
+2 Feedback
+In case you experience bugs or strange behavior of the CD program:
+
+   -  Please report it via internet mail to cdutil@tditx.com or via WWW
+      forms at http://www.tditx.com/~cdutil/index.html
+
+   -  Please include the following information
+
+         *  A detailed description of the bug
+         *  What conditions (switches, parameters) cause[d] the bug
+         *  What the exact CD command used was
+         *  Whether or not the bug is reproducible
+         *  The following for both the starting and target directory:
+               o  The exact pathname of the directory
+               o  Whether or not the directory existed
+               o  Whether or not you had read access to the directory
+         *  Your final default directory after the bug
+
+   -  Please feel free to use internet mail or the web for submitting
+      suggestions as to how this program could be made better or more
+      useful.
